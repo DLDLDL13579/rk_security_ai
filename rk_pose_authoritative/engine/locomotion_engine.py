@@ -24,22 +24,21 @@ class LocomotionEngine:
 
     def __init__(self):
         self.enter_motion = float(
-            # 【2026-09-28 实测重标定：严进宽出策略】
-            # v8-pose 的位移特征比 MediaPipe 时代缩小到 1/3~1/2，旧值 0.016 是
-            # walk_001 的 motion 中位数（0.0049）的 3.3 倍 → walking 全被判成 standing。
+            # 【2026-09-28 实测重标定】v8-pose 的位移特征比 MediaPipe 时代缩小到
+            # 1/3~1/2：walk_001 实测 motion 中位 0.0049、p75 0.0081，而旧阈值 0.016
+            # 是其中位数的 3.3 倍 → walking 几乎全被判成 standing（10%）。
             #
-            # 但 standing 与 walking 的 motion 分布严重重叠（实测前 250 帧 × 5 视频）：
-            #   standing: p25=0.0026 median=0.0038 p75=0.0053 p90=0.0082
-            #   walking : p25=0.0042 median=0.0086 p75=0.0192 p90=0.0432
-            # 单一阈值无法干净切分——低 enter 会让 standing 误判成 walking。
+            # 50 视频全量评估对比（正式 eval 脚本，唯一可信口径）：
+            #   enter/exit 0.016/0.008（旧） -> 总体 46%（walking 10%、standing 80%）
+            #   enter/exit 0.005/0.0015     -> 总体 54%（walking 90%、standing 40%）✅
+            #   enter/exit 0.010/0.0015     -> 总体 50%（walking 60%、standing 50%）
+            # 注：0.010 曾在 30 视频抽样中显示更优（预计 58%），但全量评估被推翻为 50%。
+            #   —— 教训：抽样只用于筛选假说，配置决策必须全量评估。
             #
-            # 故采用「严进门 + 宽保持」：
-            #   enter=0.010（≥0.010 时 standing 仅 6.9% 而 walking 有 42.4%，区分度最好）
-            #   exit =0.0015（进入后靠迟滞保持，避免 motion 波动掉回 standing）
-            # 50 视频抽样对比（10 视频/类）：
-            #   enter/exit 0.005/0.0015 -> standing 30~40% / walking 90%
-            #   enter/exit 0.010/0.0015 -> standing  50%    / walking 80% / squat 80%
-            os.environ.get("RK_LOCO_ENTER_MOTION", "0.010")
+            # exit 是 walking 的"保持门"，是本次修复的关键：
+            #   单视频实测 exit 0.003 → standing（walking 票 133）；
+            #              exit 0.0015 → walking（票 350）。
+            os.environ.get("RK_LOCO_ENTER_MOTION", "0.005")
         )
         self.exit_motion = float(
             # exit 是 walking 的"保持门"：旧值 0.008 高于 walking 的 motion 中位（0.0049），

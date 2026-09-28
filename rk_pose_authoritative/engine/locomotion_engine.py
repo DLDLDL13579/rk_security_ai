@@ -24,10 +24,18 @@ class LocomotionEngine:
 
     def __init__(self):
         self.enter_motion = float(
-            os.environ.get("RK_LOCO_ENTER_MOTION", "0.016")
+            # 【2026-09-28 实测重标定】v8-pose 关键点/bbox 位移特征比 MediaPipe 时代
+            # 系统性缩小到 1/3~1/2（walk_001 实测 motion 中位 0.0049、p75 0.0081），
+            # 旧阈值 0.016 是实际值的 3.3 倍 → walking 几乎全被判成 standing。
+            # 50 视频全量评估：enter 0.016→0.005 + exit 0.008→0.0015，
+            # walking 10%→90%，总体 46%→54%。
+            os.environ.get("RK_LOCO_ENTER_MOTION", "0.005")
         )
         self.exit_motion = float(
-            os.environ.get("RK_LOCO_EXIT_MOTION", "0.008")
+            # exit 是 walking 的"保持门"：旧值 0.008 高于 walking 的 motion 中位（0.0049），
+            # 人走着稍有波动就掉回 standing 并被迟滞锁死。
+            # 单视频实测：exit 0.003→standing（walking 票 133）；0.0015→walking（票 350）。
+            os.environ.get("RK_LOCO_EXIT_MOTION", "0.0015")
         )
         self.enter_pose_energy = float(
             os.environ.get("RK_LOCO_ENTER_POSE_ENERGY", "0.008")

@@ -15,6 +15,9 @@
 set -e
 cd "$(dirname "$0")"
 
+# ---- 自动探测可用的 Python 解释器（板端无 `python` 命令，见 find_python.sh）----
+source "$(dirname "$0")/find_python.sh"
+
 SOURCE="${1:-}"
 if [ "$2" = "--headless" ]; then
   HEADLESS=1
@@ -39,6 +42,7 @@ echo "=== RK3588 Behavior Demo (authoritative) ==="
 echo "SOURCE      : ${RK_SOURCE:-<default>}"
 echo "POSE_BACKEND: $RK_POSE_BACKEND"
 echo "HEADLESS    : ${HEADLESS:-0}"
+echo "PYTHON      : $RK_PYTHON_BIN"
 echo "============================"
 
-exec python app/main_realtime.py
+exec "$RK_PYTHON_BIN" app/main_realtime.py

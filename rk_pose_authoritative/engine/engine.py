@@ -202,7 +202,6 @@ class PoseEngine:
             except Exception:
                 raw_keypoints = None
 
-        crop_box = None
         if raw_keypoints is None:
             return None
 

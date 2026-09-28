@@ -248,6 +248,7 @@ class YOLO_RKNN:
 
         outputs=self.rknn.inference(inputs=[inp])
 
-        outputs=[np.array(x,dtype=np.float32) for x in outputs]
+        # 输出本就是 float32，用 asarray 避免不必要的复制（2026-09-28 优化）
+        outputs=[np.asarray(x,dtype=np.float32) for x in outputs]
 
         return self.postprocess(outputs, scale, pad_x, pad_y)

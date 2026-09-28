@@ -97,6 +97,8 @@ class PoseRKNN:
         self.supports_full_frame = True
 
         self._shape_checked = False
+        # 模型类型标志（v8 在首次 _check_outputs 时确定）
+        self._model_is_v8 = False
 
         print("[Pose] OK")
 
@@ -138,6 +140,12 @@ class PoseRKNN:
     # ========================================================
 
     def _check_outputs(self, outputs):
+        # v8-pose 结构（4 输出 / 65 通道）走独立校验，2026-09-28
+        if self._is_v8_model(outputs):
+            self._model_is_v8 = True
+            self._check_outputs_v8(outputs)
+            return
+        self._model_is_v8 = False
         c = int(outputs[0].shape[1])
         if self.num_classes is None:
             self.num_classes = c - 5 - 3 * self.num_kpts
@@ -167,6 +175,83 @@ class PoseRKNN:
     # ========================================================
     # decode single layer
     # ========================================================
+
+    # ========================================================
+    # v8-pose 支持（anchor-free + DFL）—— 2026-09-28 新增
+    #
+    # 模型: yolov8n-pose.rknn
+    # 输出: 4 个张量
+    #   3 x (1, 65, H, W)   H/W = 80/40/20；65 = 4*16(DFL) + 1(conf)
+    #   1 x (1, 17, 3, N)   关键点（N = 80*80+40*40+20*20 = 8400）
+    # 与 v5-pose（anchor-based, C=3*(5+nc+3*kpts)）完全不同
+    # ========================================================
+
+    @staticmethod
+    def _softmax(x, axis=-1):
+        e = np.exp(x - np.max(x, axis=axis, keepdims=True))
+        return e / np.sum(e, axis=axis, keepdims=True)
+
+    def _is_v8_model(self, outputs):
+        """判断是否为 v8-pose 结构（4 输出 + 65 通道）"""
+        if len(outputs) != 4:
+            return False
+        c = int(outputs[0].shape[1])
+        return c == 4 * 16 + 1        # 64 DFL + 1 conf
+
+    def _check_outputs_v8(self, outputs):
+        c = int(outputs[0].shape[1])
+        if c != 65:
+            raise RuntimeError(
+                f"v8-pose 期望通道 C=65 (4*16 DFL + 1 conf)，实际 C={c}"
+            )
+        if not self._shape_checked:
+            print("================")
+            print("POSE OUTPUT SHAPES (v8-pose)")
+            for i, o in enumerate(outputs):
+                print(i, o.shape)
+            print("================")
+            self._shape_checked = True
+
+    def decode_v8(self, outputs, strides=(8, 16, 32)):
+        """v8-pose 解码：DFL 积分 + 关键点张量
+
+        返回 (boxes, scores, kpts_list)，坐标均为 640 输入尺度
+        kpts 每项为 (num_kpts, 3) 的 x/y/conf
+        """
+        boxes, scores, kpts_list = [], [], []
+        kpt_tensor = outputs[3][0]          # (17, 3, N)
+
+        offset = 0
+        for o, st in zip(outputs[:3], strides):
+            p = o[0]                        # (65, H, W)
+            _, H, W = p.shape
+            N = H * W
+
+            # DFL: 4 边 × 16 bin → softmax 后按 bin 值加权求和
+            xywh = p[:64].reshape(4, 16, N)
+            conf = self.sigmoid(p[64]).reshape(-1)
+            bins = np.arange(16, dtype=np.float32).reshape(1, 16, 1)
+            dist = (bins * self._softmax(xywh, axis=1)).sum(axis=1)   # (4,N)
+
+            hit = np.nonzero(conf > self.conf_threshold)[0]
+            if hit.size:
+                gy = (hit // W).astype(np.float32)
+                gx = (hit % W).astype(np.float32)
+                l, t, r, b = dist[:, hit]
+                x1 = (gx + 0.5 - l) * st
+                y1 = (gy + 0.5 - t) * st
+                x2 = (gx + 0.5 + r) * st
+                y2 = (gy + 0.5 + b) * st
+                for k, idx in enumerate(hit):
+                    boxes.append([x1[k], y1[k], x2[k], y2[k]])
+                    scores.append(float(conf[idx]))
+                    # 关键点用全局候选索引（offset 为前几层的累计）
+                    kpts_list.append(
+                        kpt_tensor[:, :, offset + idx].astype(np.float32)
+                    )
+            offset += N
+
+        return boxes, scores, kpts_list
 
     def decode_layer(self, pred, anchors, stride):
         # pred: (1, C, H, W), C = 3 * (5 + nc + 3*kpts)
@@ -307,13 +392,17 @@ class PoseRKNN:
         boxes = []
         scores = []
         kpts_list = []
-        strides = [8, 16, 32]
 
-        for out, anchor, stride in zip(outputs, ANCHORS, strides):
-            b, s, k = self.decode_layer(out, anchor, stride)
-            boxes.extend(b)
-            scores.extend(s)
-            kpts_list.extend(k)
+        # 按模型类型选择解码路径（2026-09-28：兼容 v5-pose 与 v8-pose）
+        if self._model_is_v8:
+            boxes, scores, kpts_list = self.decode_v8(outputs)
+        else:
+            strides = [8, 16, 32]
+            for out, anchor, stride in zip(outputs, ANCHORS, strides):
+                b, s, k = self.decode_layer(out, anchor, stride)
+                boxes.extend(b)
+                scores.extend(s)
+                kpts_list.extend(k)
 
         if not boxes:
             return []

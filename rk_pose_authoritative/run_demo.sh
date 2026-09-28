@@ -24,7 +24,8 @@ if [ "$2" = "--headless" ]; then
 fi
 
 # ---- 演示版稳定配置（默认值，可被环境变量覆盖）----
-export RK_POSE_BACKEND="${RK_POSE_BACKEND:-mediapipe}"
+export RK_POSE_BACKEND="${RK_POSE_BACKEND:-rknn}"
+export RK_POSE_MODEL="${RK_POSE_MODEL:-$PWD/models/yolov8n-pose.rknn}"
 export RK_POSE_FULLFRAME="${RK_POSE_FULLFRAME:-1}"    # MediaPipe 自动不启用
 export RK_FRAME_WIDTH="${RK_FRAME_WIDTH:-640}"
 export RK_FRAME_HEIGHT="${RK_FRAME_HEIGHT:-360}"

@@ -24,7 +24,7 @@ YOLO_MODEL = os.environ.get(
 )
 POSE_MODEL = os.environ.get(
     "RK_POSE_MODEL",
-    os.path.join(PROJECT_ROOT, "models", "model.rknn"),
+    os.path.join(PROJECT_ROOT, "models", "yolov8n-pose.rknn"),
 )
 BEHAVIOR_MODEL = os.environ.get(
     "RK_BEHAVIOR_MODEL",
@@ -36,7 +36,7 @@ SOURCE = os.environ.get(
 )
 POSE_BACKEND = os.environ.get(
     "RK_POSE_BACKEND",
-    "mediapipe",
+    "rknn",
 ).strip().lower()
 
 

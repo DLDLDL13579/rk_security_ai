@@ -64,7 +64,7 @@ def build_engine(pose_backend="mediapipe"):
     if pose_backend == "rknn":
         from npu.pose_rknn import PoseRKNN
         pose = PoseRKNN(resolve_model_path(
-            "RK_POSE_MODEL", os.path.join("models", "model.rknn")
+            "RK_POSE_MODEL", os.path.join("models", "yolov8n-pose.rknn")
         ))
     else:
         pose = MediaPipePose()
@@ -362,7 +362,7 @@ def main():
     )
     parser.add_argument(
         "--pose-backend",
-        default=os.environ.get("RK_POSE_BACKEND", "mediapipe"),
+        default=os.environ.get("RK_POSE_BACKEND", "rknn"),
         choices=["mediapipe", "rknn"],
     )
     args = parser.parse_args()

@@ -9,7 +9,7 @@ from engine.locomotion_engine import LocomotionEngine
 from engine.object_engine import ObjectEngine
 from engine.sequence_buffer import PoseSequenceBuffer
 from engine.special_action_engine import SpecialActionEngine
-from engine.tracker import SimpleTracker
+from engine.tracker import SimpleTracker, ByteTracker
 from npu.behavior_rknn import BehaviorRKNN
 
 
@@ -49,7 +49,20 @@ class PoseEngine:
             stride=max(1, int(os.environ.get("RK_BEHAVIOR_STRIDE", "2"))),
         )
         self.behavior = BehaviorRKNN(behavior_model_path)
-        self.tracker = SimpleTracker()
+        # 跟踪器：默认 ByteTrack（两阶段关联，低分框续接轨迹）
+        # RK_TRACKER=simple 可回退到旧实现（2026-09-28）
+        # 【实测结论 2026-09-28】ByteTracker 在本项目实测轨迹数 17→19（变差）：
+        # stand_004 的 770 帧里相邻帧 IoU 高达 0.97、中心距 0.006（匹配毫无困难），
+        # 多轨迹来自画面中真实存在的多目标/背景误检，而非跟踪器失配。
+        # 故默认回退 SimpleTracker；ByteTracker 保留（RK_TRACKER=bytetrack 可启用）
+        # 供后续在"检测更干净"的前提下再评估。
+        tracker_kind = os.environ.get("RK_TRACKER", "simple").strip().lower()
+        if tracker_kind == "simple":
+            self.tracker = SimpleTracker()
+            print("[ENGINE] tracker: SimpleTracker (legacy)")
+        else:
+            self.tracker = ByteTracker()
+            print("[ENGINE] tracker: ByteTracker (two-stage)")
         self.object_engine = ObjectEngine()
         self.locomotion_engine = LocomotionEngine()
         self.special_engine = SpecialActionEngine()
@@ -112,14 +125,23 @@ class PoseEngine:
         detections = self.object_engine.process(yolo_out)
 
         persons = []
+        low_persons = []
         for det in detections:
             if det.cls != "person":
                 continue
             if not self._keep_person_bbox(det.bbox):
                 continue
-            persons.append(det)
+            # 低分框只喂跟踪器第二轮，不对外输出（2026-09-28 ByteTrack）
+            if getattr(det, "low_conf", False):
+                low_persons.append(det)
+            else:
+                persons.append(det)
 
-        tracked = self.tracker.update(persons)
+        # ByteTracker 接受低分框做第二轮；SimpleTracker 只吃高分框（回退路径）
+        if low_persons and isinstance(self.tracker, ByteTracker):
+            tracked = self.tracker.update(persons, low_persons)
+        else:
+            tracked = self.tracker.update(persons)
 
         self.latest_tracks = tracked
         self.latest_detection_frame_id = self.frame_index

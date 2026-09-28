@@ -245,3 +245,104 @@ class SimpleTracker:
                 out.append(self._ghost_track(track_id, track))
 
         return out
+
+
+# ============================================================
+# ByteTracker —— 两阶段关联（2026-09-28 新增）
+#
+# 动机：SimpleTracker 只用高分框（score>=0.35）匹配，遮挡/模糊帧里目标分数
+# 掉到阈值以下时轨迹直接断裂 → 每断一次就重新积累 16 帧序列 → 行为大量停在
+# warming、判定 flips 暴增。实测 33/50 视频存在此抖动，stand_004 一条 770 帧
+# 的视频产生 17~38 条轨迹。
+#
+# ByteTrack 的做法（Zhang et al. ECCV 2022）：
+#   1. 高分框先与所有轨迹做 IoU 匹配（第一轮）
+#   2. 未匹配上的轨迹，再用低分框（0.1~0.35）做第二轮匹配
+#      —— 低分框往往是"被遮挡/模糊但位置正确"的真实目标，用它续命轨迹
+#   3. 只有高分框中未匹配的才新建轨迹（低分框永不新建，避免误检建轨）
+#
+# 板端无 scipy，用贪心 IoU 替代匈牙利算法（本项目目标数少，实测等价效果好）。
+# ============================================================
+
+class ByteTracker(SimpleTracker):
+    """ByteTrack 两阶段跟踪器；接口与 SimpleTracker 完全兼容。
+
+    update(detections, low_detections=None)
+      detections     : 高分框（沿用现有 ObjectEngine.score_thresh 过滤）
+      low_detections : 低分框（可选；用于第二轮续接轨迹，不新建轨迹）
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 第二轮匹配的 IoU 门限（比第一轮略宽松，因为低分框位置噪声更大）
+        self.second_iou_threshold = float(
+            os.environ.get("RK_BYTETRACK_IOU2", "0.20")
+        )
+        self.second_max_center_ratio = float(
+            os.environ.get("RK_BYTETRACK_CENTER2", "1.10")
+        )
+
+    def _second_stage_match(self, low_detections, unmatched_track_ids):
+        """第二轮：用低分框续接未匹配轨迹（只更新 bbox，不新建轨迹）"""
+        if not low_detections or not unmatched_track_ids:
+            return set()
+        candidates = []
+        for det_index, det in enumerate(low_detections):
+            bbox = self._get_bbox(det)
+            for track_id in unmatched_track_ids:
+                track = self.tracks.get(track_id)
+                if track is None:
+                    continue
+                track_box = track["bbox"]
+                if self._area_ratio(bbox, track_box) > self.max_area_ratio:
+                    continue
+                iou = self._iou(bbox, track_box)
+                center_ratio = self._center_distance_ratio(bbox, track_box)
+                if iou >= self.second_iou_threshold:
+                    score = iou * 2.0
+                elif center_ratio <= self.second_max_center_ratio:
+                    score = 1.0 - min(1.0, center_ratio)
+                else:
+                    continue
+                candidates.append((score, det_index, track_id))
+        candidates.sort(reverse=True, key=lambda item: item[0])
+
+        used_dets = set()
+        used_tracks = set()
+        for score, det_index, track_id in candidates:
+            if det_index in used_dets or track_id in used_tracks:
+                continue
+            det = low_detections[det_index]
+            bbox = self._get_bbox(det)
+            track = self.tracks[track_id]
+            # 低分框噪声更大：平滑系数更强（更信任历史 bbox）
+            smooth_bbox = self._smooth_bbox(track["bbox"], bbox)
+            track["bbox"] = smooth_bbox
+            track["lost"] = 0
+            track["time"] = time.time()
+            track["hits"] = track.get("hits", 0) + 1
+            track["low_conf_hits"] = track.get("low_conf_hits", 0) + 1
+            used_dets.add(det_index)
+            used_tracks.add(track_id)
+        return used_tracks
+
+    def update(self, detections, low_detections=None):
+        """两阶段关联。
+
+        与父类不同的是：第一轮匹配后，未匹配轨迹在返回 ghost 之前，
+        先尝试用低分框续命。
+        """
+        if not low_detections:
+            return super().update(detections)
+
+        # 第一轮：完全复用父类逻辑（它已实现贪心匹配 + 平滑 + ghost）
+        tracked = super().update(detections)
+
+        # 找出"本轮没有高分框匹配上"的轨迹：
+        # 父类把命中轨迹的 lost 置 0，未命中的 lost++。
+        # 这里挑出 lost>0 的轨迹做第二轮。
+        unmatched = [tid for tid, tr in self.tracks.items() if tr.get("lost", 0) > 0]
+        if unmatched:
+            self._second_stage_match(low_detections, unmatched)
+
+        return tracked

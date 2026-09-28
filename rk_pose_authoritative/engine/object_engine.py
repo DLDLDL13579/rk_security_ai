@@ -130,7 +130,11 @@ class Detection:
                  bbox,
                  track_id=-1,
                  timestamp=None,
-                 extra=None):
+                 extra=None,
+                 low_conf=False):
+        # ByteTrack 低分框标记：True 表示该框仅用于跟踪器第二轮续接轨迹，
+        # 不参与行为识别（2026-09-28）
+        self.low_conf = bool(low_conf)
         # YOLO类别ID
         self.cls_id = int(cls_id)
 
@@ -190,6 +194,11 @@ class ObjectEngine:
         self.score_thresh = float(
             os.environ.get("RK_OBJECT_SCORE", "0.35")
         )
+        # ByteTrack 低分框门限（2026-09-28）：低于 score_thresh 但高于此值的框
+        # 不参与对外输出，只用于跟踪器第二轮续接轨迹。设为 0 可关闭该功能。
+        self.low_score_thresh = float(
+            os.environ.get("RK_OBJECT_LOW_SCORE", "0.10")
+        )
         self.iou_thresh = 0.30
         print("[ObjectEngine] Ready")
 
@@ -244,7 +253,10 @@ class ObjectEngine:
                 # score
                 # -----------------------------
                 score = float(obj.get("score", 0.0))
-                if score < self.score_thresh:
+                # 低于对外阈值但高于低分门限的框保留给跟踪器（ByteTrack 第二轮），
+                # 作为 low_conf 标记；低于低分门限的直接丢弃（2026-09-28）
+                is_low = score < self.score_thresh
+                if is_low and score < self.low_score_thresh:
                     continue
 
                 # -----------------------------
@@ -266,7 +278,8 @@ class ObjectEngine:
                     cls_name=cls,
                     score=score,
                     bbox=bbox,
-                    track_id=-1
+                    track_id=-1,
+                    low_conf=is_low
                 )
                 detections.append(det)
 

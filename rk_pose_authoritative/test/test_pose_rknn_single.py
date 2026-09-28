@@ -16,7 +16,10 @@ from npu.pose_rknn import PoseRKNN
 # 配置
 # ==========================
 
-MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "model.rknn")
+MODEL_PATH = os.environ.get(
+    "RK_POSE_MODEL",
+    os.path.join(PROJECT_ROOT, "models", "yolov8n-pose.rknn"),
+)
 
 IMAGE_PATH = os.path.join(PROJECT_ROOT, "test", "person.jpg")
 
@@ -28,32 +31,30 @@ SAVE_PATH = os.path.join(PROJECT_ROOT, "output", "pose_test.jpg")
 # COCO17骨架
 # ==========================
 
+# MediaPipe 33 点骨架连线表（detect() 经 convert17to33 返回 MediaPipe 兼容格式）
+# 索引对照 MediaPipe Pose：11=左肩 12=右肩 13=左肘 14=右肘 15=左腕 16=右腕
+# 23=左髋 24=右髋 25=左膝 26=右膝 27=左踝 28=右踝
+# 注：convert17to33 只填充 COCO 17 点对应的位置，面部/手部点为占位值
 SKELETON = [
 
-    (0,1),
-    (0,2),
-
-    (1,3),
-    (2,4),
-
-    (5,6),
-
-    (5,7),
-    (7,9),
-
-    (6,8),
-    (8,10),
-
-    (5,11),
-    (6,12),
-
-    (11,12),
+    (11,12),   # 肩-肩
 
     (11,13),
-    (13,15),
+    (13,15),   # 左臂
 
     (12,14),
-    (14,16)
+    (14,16),   # 右臂
+
+    (11,23),
+    (12,24),   # 肩-髋
+
+    (23,24),   # 髋-髋
+
+    (23,25),
+    (25,27),   # 左腿
+
+    (24,26),
+    (26,28)    # 右腿
 
 ]
 
@@ -64,6 +65,8 @@ def draw_pose(
         kpts
 ):
 
+    # detect() 返回归一化坐标(0~1)，需乘以图像宽高换算成像素
+    h, w = img.shape[:2]
 
     for x,y,score in kpts:
 
@@ -76,8 +79,8 @@ def draw_pose(
                 img,
 
                 (
-                    int(x),
-                    int(y)
+                    int(x * w),
+                    int(y * h)
                 ),
 
                 5,
@@ -104,13 +107,13 @@ def draw_pose(
                 img,
 
                 (
-                    int(kpts[a][0]),
-                    int(kpts[a][1])
+                    int(kpts[a][0] * w),
+                    int(kpts[a][1] * h)
                 ),
 
                 (
-                    int(kpts[b][0]),
-                    int(kpts[b][1])
+                    int(kpts[b][0] * w),
+                    int(kpts[b][1] * h)
                 ),
 
                 (255,0,0),
@@ -194,7 +197,9 @@ def main():
     # 注意：
     # 使用工程接口
     #
-    kpts=pose.inference(
+    # detect() 返回 33 个 Landmark 的列表（归一化坐标 0~1）
+    # —— v5-pose 时代此函数名是 inference()，v8-pose 集成后统一为 detect()（2026-09-28 修复 P0-4）
+    kpts=pose.detect(
         img
     )
 
@@ -240,14 +245,19 @@ def main():
     # ----------------------
 
 
+    # detect() 返回 Landmark 对象列表，需解包为 (N,3) 数组
     kpts=np.array(
-        kpts,
+        [
+            [point.x, point.y, point.visibility]
+            for point in kpts
+        ],
         dtype=np.float32
     )
 
 
 
-    if kpts.shape != (17,3):
+    # v8-pose 输出经 convert17to33 映射为 MediaPipe 兼容的 33 点格式
+    if kpts.shape != (33,3):
 
         print(
             "[ERROR] keypoint format wrong"
@@ -255,7 +265,7 @@ def main():
 
         print(
             "expect:",
-            "(17,3)"
+            "(33,3)"
         )
 
         print(

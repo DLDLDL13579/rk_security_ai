@@ -1,0 +1,45 @@
+# ---- 测试视频与录制（体积大，不入库）----
+*.mp4
+*.avi
+*.mkv
+*.mov
+videos/
+videos_camera/
+videos_multi/
+data/videos/
+
+# ---- 模型权重（大文件，另行管理）----
+*.rknn
+*.pdiparams
+*.pdmodel
+*.pt
+*.pth
+*.mnn
+*.nb
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 运行产物 ----
+output/
+outputs/
+*.log
+*.csv
+
+# ---- 编辑器/系统 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+*.bak
+*.save
+
+# ---- 运行缓存 ----
+realtime/
+*.jpg
+*.jpeg
+*.png

@@ -1,0 +1,11 @@
+# RK3588 板端运行依赖（rk_pose_project _8.7）
+# RKNN 2.3.2 配套 rknnlite，版本必须与板端 RKNN 驱动一致
+rknnlite>=2.0
+opencv-python
+mediapipe
+numpy<2.0
+
+# ---- PC 端（模型转换/校验用，板端不需要；与板端 rknnlite 分开环境）----
+# rknn-toolkit2
+# onnxruntime
+# onnx

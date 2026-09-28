@@ -74,6 +74,10 @@ class AIThread:
                             "state": b.get("state", "valid"),
                             "proximity_state": b.get("proximity_state", "normal"),
                             "pose_quality": float(b.get("pose_quality", 0.0)),
+                            # 关键点透传给显示层画骨架（2026-09-28 新增）
+                            "keypoints": b.get("keypoints"),
+                            "keypoints_frame": b.get("keypoints_frame", "full_frame"),
+                            "crop_box": b.get("crop_box"),
                         }
 
                     self.shared.publish_behaviors(frame_id, behavior_output)

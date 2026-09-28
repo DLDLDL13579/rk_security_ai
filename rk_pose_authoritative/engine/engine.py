@@ -202,6 +202,7 @@ class PoseEngine:
             except Exception:
                 raw_keypoints = None
 
+        crop_box = None
         if raw_keypoints is None:
             return None
 
@@ -258,6 +259,18 @@ class PoseEngine:
             if self.buffer.length(person.track_id) < self.buffer.max_len:
                 result_state = "warming"
 
+        # 关键点转为简单格式供显示层画骨架（2026-09-28 新增）
+        # 注：full-frame 路径（v8-pose）为整帧归一化坐标 0~1；
+        #     裁剪路径（MediaPipe）为裁剪框内归一化，显示层按需换算。
+        kpts_simple = [
+            {
+                "x": float(pt.x),
+                "y": float(pt.y),
+                "v": float(getattr(pt, "visibility", 1.0)),
+            }
+            for pt in keypoints
+        ]
+
         return {
             "track_id": person.track_id,
             "bbox": list(person.bbox),
@@ -270,6 +283,9 @@ class PoseEngine:
             "gait_amp": float(result.get("amp", 0.0)),
             "channel": result.get("channel", "locomotion"),
             "frame_id": frame_id,
+            "keypoints": kpts_simple,
+            "keypoints_frame": "full_frame" if self.full_frame_pose else "crop",
+            "crop_box": None if self.full_frame_pose else list(crop_box),
         }
 
     @staticmethod

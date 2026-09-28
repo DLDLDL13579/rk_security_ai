@@ -3,6 +3,33 @@ import cv2
 import time
 
 
+# ============================================================
+# 骨架连线定义（2026-09-28 新增：支持画人体骨架）
+# ============================================================
+
+# MediaPipe 33 点骨架（本项目特征提取用的体系）
+SKELETON_33 = [
+    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),   # 双臂+肩
+    (11, 23), (12, 24), (23, 24),                        # 躯干
+    (23, 25), (25, 27), (24, 26), (26, 28),              # 双腿
+    (27, 31), (28, 32), (15, 17), (16, 18),              # 手脚末端
+    (0, 11), (0, 12),                                    # 头->肩
+    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),             # 面部
+]
+
+# COCO 17 点骨架（v8-pose 原生输出，未经映射时用）
+SKELETON_17 = [
+    (15, 13), (13, 11), (16, 14), (14, 12), (11, 12), (5, 11), (6, 12),
+    (5, 6), (5, 7), (6, 8), (7, 9), (8, 10),
+    (11, 13), (13, 15), (12, 14), (14, 16),
+]
+
+# 骨架配色（BGR）
+SKELETON_COLOR = (255, 128, 0)      # 蓝色线条
+KEYPOINT_COLOR = (0, 0, 255)        # 红色关节点
+KP_VIS_THRESHOLD = 0.3              # 关键点可见性阈值
+
+
 class DisplayThread:
     def __init__(self, shared, width=960, height=540):
         self.shared = shared
@@ -115,6 +142,68 @@ class DisplayThread:
             y2 + dy,
         ]
 
+    # ========================================================
+    # 画人体骨架（2026-09-28 新增）
+    # ========================================================
+
+    def draw_skeleton(self, img, kpts, frame_mode="full_frame", crop_box=None,
+                      src_shape=None, dst_shape=None):
+        """在 img 上画骨架
+
+        kpts:        [{"x","y","v"}, ...] 33 个关键点
+        frame_mode:  "full_frame" = 坐标为整帧归一化 0~1
+                     "crop"       = 坐标为裁剪框内归一化，需换算
+        crop_box:    (x1,y1,x2,y2) 裁剪框（crop 模式需要），源图坐标系
+        src_shape:   源图 (h, w)
+        dst_shape:   目标显示图 (h, w)
+        """
+        if not kpts:
+            return
+
+        h_dst, w_dst = dst_shape if dst_shape else img.shape[:2]
+
+        # 选择骨架连表：33 点用 SKELETON_33，17 点用 SKELETON_17
+        if len(kpts) >= 33:
+            links = SKELETON_33
+        elif len(kpts) >= 17:
+            links = SKELETON_17
+        else:
+            return
+
+        # 计算归一化 -> 显示像素的映射
+        pts = []
+        if frame_mode == "full_frame" or crop_box is None:
+            # 整帧归一化：直接乘显示尺寸
+            for kp in kpts:
+                pts.append((int(kp["x"] * w_dst), int(kp["y"] * h_dst), kp.get("v", 1.0)))
+        else:
+            # 裁剪框内归一化：先换算到源图，再缩放到显示图
+            if src_shape is None:
+                return
+            h_src, w_src = src_shape
+            cx1, cy1, cx2, cy2 = crop_box
+            cw, ch = max(1, cx2 - cx1), max(1, cy2 - cy1)
+            sx = w_dst / float(w_src)
+            sy = h_dst / float(h_src)
+            for kp in kpts:
+                px = (cx1 + kp["x"] * cw) * sx
+                py = (cy1 + kp["y"] * ch) * sy
+                pts.append((int(px), int(py), kp.get("v", 1.0)))
+
+        # 画连线
+        for a, b in links:
+            if a >= len(pts) or b >= len(pts):
+                continue
+            pa, pb = pts[a], pts[b]
+            if pa[2] >= KP_VIS_THRESHOLD and pb[2] >= KP_VIS_THRESHOLD:
+                cv2.line(img, (pa[0], pa[1]), (pb[0], pb[1]),
+                         SKELETON_COLOR, 2, cv2.LINE_AA)
+
+        # 画关节点
+        for px, py, v in pts:
+            if v >= KP_VIS_THRESHOLD:
+                cv2.circle(img, (px, py), 3, KEYPOINT_COLOR, -1, cv2.LINE_AA)
+
     def draw_person(self, img, pid, det, behavior, result_frame_id, current_frame_id, source_shape):
         bbox = det.get("bbox")
         if bbox is None:
@@ -161,7 +250,7 @@ class DisplayThread:
         if status not in ("", "valid", "warming"):
             label += f" [{status}]"
 
-        font_scale = 0.62
+        font_scale = 0.85
         thickness = 2
         (tw, th), _ = cv2.getTextSize(
             label,
@@ -172,11 +261,15 @@ class DisplayThread:
 
         label_top = max(0, y1 - th - 12)
         label_bottom = min(self.height - 1, y1)
-        label_right = min(self.width - 1, x1 + tw + 10)
+        # 修正：标签起点也要 clamp，否则人在画面右侧时文字被右边缘裁掉
+        # （2026-09-28 修复：原来只 clamp 右边界，导致可用宽度不足）
+        box_w = tw + 10
+        label_left = max(0, min(x1, self.width - 1 - box_w))
+        label_right = min(self.width - 1, label_left + box_w)
 
         cv2.rectangle(
             img,
-            (x1, label_top),
+            (label_left, label_top),
             (label_right, label_bottom),
             (0, 0, 0),
             -1,
@@ -184,7 +277,7 @@ class DisplayThread:
         cv2.putText(
             img,
             label,
-            (x1 + 5, label_bottom - 6),
+            (label_left + 5, label_bottom - 6),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
             (0, 255, 255),
@@ -221,6 +314,18 @@ class DisplayThread:
             if isinstance(detections, dict):
                 for pid, det in detections.items():
                     behavior = behaviors.get(pid) if isinstance(behaviors, dict) else None
+
+                    # 先画骨架（在框下层，避免遮挡），2026-09-28 新增
+                    if behavior is not None and behavior.get("keypoints"):
+                        self.draw_skeleton(
+                            show,
+                            behavior.get("keypoints"),
+                            frame_mode=behavior.get("keypoints_frame", "full_frame"),
+                            crop_box=behavior.get("crop_box"),
+                            src_shape=source_shape,
+                            dst_shape=show.shape[:2],
+                        )
+
                     self.draw_person(
                         show,
                         pid,

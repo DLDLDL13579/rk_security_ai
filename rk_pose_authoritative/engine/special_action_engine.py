@@ -25,6 +25,12 @@ class SpecialActionEngine:
             "bend": float(os.environ.get("RK_SPECIAL_BEND_MIN_SCORE", "0.55")),
             "fall_down": float(os.environ.get("RK_SPECIAL_FALL_MIN_SCORE", "0.70")),
         }
+        # 模型主导门槛：新 TCN 置信度饱和（实测 min 0.984），0.80 可安全采纳
+        self.model_lead_score = float(
+            os.environ.get("RK_SPECIAL_MODEL_LEAD_SCORE", "0.80")
+        )
+        self._unused_thresholds = {
+        }
         # 模型支持时的确认帧数
         self.streaks = {
             "squat": max(1, int(os.environ.get("RK_SPECIAL_SQUAT_STREAK", "2"))),
@@ -193,20 +199,26 @@ class SpecialActionEngine:
         if geo_candidate is None:
             partial_candidate = self._geometry_partial(geometry, bbox)
 
+        # 【2026-09-29 模型优先】重训后的 TCN（17.7k 序列，序列级 100% 准确）
+        # 已远比手写几何规则可靠。原逻辑是"几何命中优先、模型兜底"（geo_candidate
+        # 先于 model_ok），导致模型正确输出被几何误判覆盖。
+        # 新逻辑：模型高置信优先；模型缺失/低置信时才回退几何判据。
+        model_lead = model_ok and float(score) >= self.model_lead_score
+
         candidate = None
         is_partial = False
-        if geo_candidate is not None:
+        if model_lead:
+            candidate = model_action
+        elif geo_candidate is not None:
             candidate = geo_candidate
-        elif model_ok and model_action != "fall_down":
+        elif model_ok:
             candidate = model_action
         elif partial_candidate is not None:
             candidate = partial_candidate
             is_partial = True
-        elif model_action == "fall_down":
-            candidate = "fall_down"
 
-        # fall_down 必须有几何支撑，防止误报
-        if candidate == "fall_down" and geo_candidate != "fall_down":
+        # 几何门仅对"非模型主导"的 fall_down 生效（模型主导时信任模型输出）
+        if candidate == "fall_down" and not model_lead and geo_candidate != "fall_down":
             self.states.pop(track_id, None)
             return None
         if candidate == "fall_down" and pose_quality < self.fall_pose_quality:

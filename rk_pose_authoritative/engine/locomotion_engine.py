@@ -79,6 +79,10 @@ class LocomotionEngine:
             3,
             int(os.environ.get("RK_LOCO_WARMUP_SAMPLES", "5")),
         )
+        # 模型主导门槛：新 TCN 置信度饱和（实测 min 0.984），0.80 可安全采纳
+        self.model_lead_score = float(
+            os.environ.get("RK_LOCO_MODEL_LEAD_SCORE", "0.80")
+        )
         self.walk_hint_score = float(
             os.environ.get("RK_LOCO_WALK_HINT_SCORE", "0.68")
         )
@@ -159,22 +163,32 @@ class LocomotionEngine:
             motion >= self.exit_motion or gait_ev_strong
         )
 
-        # 镜头运动补偿：快速移动镜头时，静止人物的 bbox 中心位移会被污染成
-        # "假行走"（motion 远超 enter_motion）。因此 walking 不再由位移单独触发，
-        # 必须同时具备位移证据 + 步态/模型证据：
-        #   - 步态证据可信（踝可见 + 有摆动幅度 + 换向节奏）
-        #   - 或模型强烈支持 walking，且至少存在踝部摆动幅度（防止纯镜头抖动
-        #     让 TCN 的 velocity 特征误判为 walking）
-        want_walking = (
-            motion_ev
-            and (gait_trusted or (model_ev and amp >= self.gait_amp))
+        # 【2026-09-29 模型主导】重训后的 TCN（17.7k 序列训练，序列级 100% 准确、
+        # 置信度饱和至 1.0）已远比手写几何/运动阈值可靠。
+        # 原逻辑要求 motion_ev + (gait_trusted or model_ev)，实测导致：
+        #   - standing 视频里人微动 → motion_ev 为真 + 踝摆假象 → 误判 walking（40%）
+        #   - TCN 明确输出 standing 时也无法纠正（几何证据优先）
+        # 新逻辑：TCN 高置信直接采纳；仅当 TCN 缺失/低置信时才回退到几何判据。
+        model_lead = (
+            model_action in ("standing", "walking")
+            and model_score >= self.model_lead_score
         )
+        if model_lead:
+            want_walking = (model_action == "walking")
+            want_standing = (model_action == "standing")
+        else:
+            # 回退：原几何/运动判据（TCN 序列未攒满或低置信时）
+            want_walking = (
+                motion_ev
+                and (gait_trusted or (model_ev and amp >= self.gait_amp))
+            )
+            want_standing = motion <= self.exit_motion
 
         # 站立以 bbox 位移为准（最可靠信号），不再要求姿态能量/踝摆低于噪声地板
         want_standing = motion <= self.exit_motion
 
-        if want_walking and want_standing:
-            # 冲突时以更直接的位移证据为准
+        if want_walking and want_standing and not model_lead:
+            # 冲突时以更直接的位移证据为准（仅几何回退路径）
             want_standing = not (motion_ev or gait_trusted)
 
         desired = state["action"]

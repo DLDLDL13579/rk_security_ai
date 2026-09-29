@@ -55,3 +55,4 @@ realtime/
 !rk_pose_authoritative/models/*.onnx
 rk_pose_authoritative/security_mqtt.env
 *.bak_security_*
+rk_pose_authoritative/models/best_fire_smoke.rknn

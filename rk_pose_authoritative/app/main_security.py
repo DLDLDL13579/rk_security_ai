@@ -44,10 +44,15 @@ from display.display import DisplayThread
 PROJECT_ROOT = BASE_DIR
 
 YOLO_MODEL = os.environ.get("RK_YOLO_MODEL", os.path.join(PROJECT_ROOT, "models", "yolov5s-640-640.rknn"))
-POSE_MODEL = os.environ.get("RK_POSE_MODEL", os.path.join(PROJECT_ROOT, "models", "model.rknn"))
+# 注意：models/model.rknn 是检测模型副本（md5 与 yolov5s-640-640.rknn 相同，见 P0-1），
+# 真正的姿态模型是 yolov8n-pose.rknn —— 与 run_demo.sh 的权威默认值保持一致。
+POSE_MODEL = os.environ.get(
+    "RK_POSE_MODEL", os.path.join(PROJECT_ROOT, "models", "yolov8n-pose.rknn")
+)
 BEHAVIOR_MODEL = os.environ.get("RK_BEHAVIOR_MODEL", os.path.join(PROJECT_ROOT, "models", "behavior_tcn.rknn"))
 SOURCE = os.environ.get("RK_SOURCE", os.path.join(PROJECT_ROOT, "data", "videos", "walking", "walk_001.mp4"))
-POSE_BACKEND = os.environ.get("RK_POSE_BACKEND", "mediapipe").strip().lower()
+# 与 run_demo.sh 一致：板端默认走 NPU（rknn），而非 CPU 的 mediapipe
+POSE_BACKEND = os.environ.get("RK_POSE_BACKEND", "rknn").strip().lower()
 
 FIRE_SMOKE_MODEL = os.environ.get("RK_FIRE_SMOKE_MODEL", "").strip()
 FALL_CONFIDENCE = float(os.environ.get("RK_FALL_CONFIDENCE", "0.55"))

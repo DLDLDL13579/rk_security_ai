@@ -5,6 +5,10 @@ import threading
 class SharedData:
     def __init__(self):
         self.lock = threading.Lock()
+        self._events = []
+        self._security_states = {}
+        self._security_detections = []
+        self._zone_overlays = []
 
         self._frame = None
         self._frame_id = -1
@@ -108,3 +112,39 @@ class SharedData:
                 "behaviors": copy.deepcopy(self._behaviors),
                 "fps": self._fps,
             }
+
+    # === SECURITY PATCH (security_monitor) ===
+    # 以下方法由 security_patch 增量追加，用于安防事件/区域状态共享。
+    # 原有方法未被改动。
+
+    def set_events(self, events):
+        with self.lock:
+            self._events = copy.deepcopy(events)
+
+    def get_events(self):
+        with self.lock:
+            return copy.deepcopy(self._events)
+
+    def set_security_states(self, security_states):
+        with self.lock:
+            self._security_states = copy.deepcopy(security_states)
+
+    def get_security_states(self):
+        with self.lock:
+            return copy.deepcopy(self._security_states)
+
+    def set_security_detections(self, detections):
+        with self.lock:
+            self._security_detections = copy.deepcopy(detections)
+
+    def get_security_detections(self):
+        with self.lock:
+            return copy.deepcopy(self._security_detections)
+
+    def set_zone_overlays(self, zones):
+        with self.lock:
+            self._zone_overlays = copy.deepcopy(zones)
+
+    def get_zone_overlays(self):
+        with self.lock:
+            return copy.deepcopy(self._zone_overlays)

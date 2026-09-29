@@ -53,3 +53,5 @@ realtime/
 !rk_pose_authoritative/models/*.rknn
 !rk_pose_security/npu/*.rknn
 !rk_pose_authoritative/models/*.onnx
+rk_pose_authoritative/security_mqtt.env
+*.bak_security_*

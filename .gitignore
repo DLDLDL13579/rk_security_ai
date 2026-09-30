@@ -57,3 +57,7 @@ rk_pose_authoritative/security_mqtt.env
 *.bak_security_*
 rk_pose_authoritative/models/best_fire_smoke.rknn
 *.bak_*
+
+# macOS 元数据（AppleDouble / Finder），从 Mac 传文件时会附带
+._*
+.DS_Store

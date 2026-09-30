@@ -86,6 +86,27 @@ systemd 单元 `rk-cam-mjpeg.service` 的 `ExecStart` 硬编码
 
 **⑤ 部署后需重启主进程才生效。** 用 `~/start_security.sh`（含单实例保护）。
 
+**⑥ 摄像头凭据不再硬编码在源码里。**（2026-09-30 安全整改）
+`cam/*.py` 原先明文写着摄像头账号密码并进了公开仓库，现已改为环境变量注入：
+
+```bash
+# 方式一：直接给完整地址
+export CAM_RTSP="rtsp://<user>:<password>@<ip>:554/Streaming/Channels/102"
+# 方式二：分开给三件套
+export CAM_USER=<user> CAM_PASSWORD=<password> CAM_HOST=<ip>
+```
+
+板端由 `rk-cam-mjpeg.service` 的 `Environment=` 提供（单元文件权限 600）。
+**缺凭据时会明确报错退出**，不再有硬编码兜底。`/status` 接口与启动横幅
+也已脱敏（`rtsp://user:***@host/...`）。
+
+> ⚠️ 历史提交 `aff2906` 中仍含旧密码，需在摄像头侧改密或清理 git 历史。
+
+## 目录归属
+
+**本目录已纳入板端仓库**：`~/rk_security_ai/tools/security_patch/`（提交 `f6dd181`）。
+板端是权威源，本地这份是便于编辑的工作副本；两者若不一致以板端为准。
+
 ## 板端重启方式
 
 ```bash

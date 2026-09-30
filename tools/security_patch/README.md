@@ -100,7 +100,10 @@ export CAM_USER=<user> CAM_PASSWORD=<password> CAM_HOST=<ip>
 **缺凭据时会明确报错退出**，不再有硬编码兜底。`/status` 接口与启动横幅
 也已脱敏（`rtsp://user:***@host/...`）。
 
-> ⚠️ 历史提交 `aff2906` 中仍含旧密码，需在摄像头侧改密或清理 git 历史。
+> ⚠️ 历史提交 `aff2906` 中仍含旧密码。**用户已知情并决定暂不处置**（2026-09-30）——
+> 摄像头在 `eth2` 专网、仅板端可达、未开 `ip_forward`，外部拿到凭据也路由不到该网段。
+> 这是已做出的决策，不要再当作未决问题提出。将来若需彻底消除：① 摄像头侧改密
+> （同步更新 `rk-cam-mjpeg.service` 的 `Environment=`）；② `git filter-repo` 重写历史。
 
 ## 目录归属
 

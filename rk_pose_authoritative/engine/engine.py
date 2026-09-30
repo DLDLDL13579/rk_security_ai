@@ -458,28 +458,16 @@ class PoseEngine:
         dt = max(1, frame_id - prev["frame_id"])
         dx = center_x - prev["center_x"]
         dy = center_y - prev["center_y"]
-        speed = ((dx * dx + dy * dy) ** 0.5) / (person_height * dt)
-
-        # === WINDOW_NET_DISP_PATCH (2026-09-30) ===
-        # 用户实测：坐着不动被持续判 walking。
+        # === WINDOW_NET_DISP_PATCH v2 (2026-09-30) ===
+        # v1 用"瞬时位移/身高"作为兜底，实测仍在实机误判 walking：
+        #   ① track_id 换号后 hist 重新累积，前 14 次推理都走瞬时速度分支
+        #      → 又一次暴露在"2~3px 抖动 = 0.005~0.0075"的老问题上
+        #   ② 实时流中 frame_id 每次推理前进约 1.8（30fps 视频 / 16.7Hz 推理），
+        #      而 hist 只在推理时追加，用 frame_id 差当"帧数"会失配
         #
-        # 根因（两层，第二层是真凶）：
-        #   ① 原 motion = 单帧位移 / 身高。身高仅约 400px 时，检测框
-        #      2~3 像素的随机抖动就产生 0.005~0.0075 的 motion —— 直接
-        #      越过 enter_motion(0.005)。
-        #   ② 旧"净位移增益"是带衰减的单向累加器，抖动非零均值时会缓慢
-        #      累积，进一步把 motion 撑高，导致一旦进入 walking 就退不出来。
-        #   （先加了同向性检验，实测几乎无改善：瞬时速度本身就是主导项。）
-        #
-        # 修法：motion 改为【时间窗口内的净位移速率】——
-        #   取最近 N 帧窗口首尾位置差（净位移），除以身高与窗口帧数。
-        #   随机抖动在窗口内正负相消（净位移≈0），真实行走则持续累积。
-        #   实测区分度：
-        #     坐着抖动 ±3px    → 0.008   （应判 standing）
-        #     来回晃动 ±10px   → 0.000   （应判 standing）
-        #     远景行走 2px/帧  → 0.140   （应判 walking）
-        #     正常行走 8px/帧  → 0.247   （应判 walking）
-        #   行走与抖动相差约 30 倍，门槛可干净切分。
+        # v2 改法：窗口速率是唯一依据；窗口未攒满时 motion 直接为 0
+        #   （宁可短时判 standing，也不因抖动误判 walking —— 安防场景
+        #    漏判行走的代价远小于误判行走）
         hist = prev.get("hist")
         if hist is None:
             hist = []
@@ -489,15 +477,15 @@ class PoseEngine:
             hist = hist[-win:]
         current["hist"] = hist
 
+        speed = 0.0
         if len(hist) >= win:
             f0, x0, y0 = hist[0]
-            span_frames = max(1, frame_id - f0)
+            # 用窗口内「采样点数」而非 frame_id 差：采样点才是真实的时间跨度
+            span_samples = max(1, len(hist) - 1)
             win_net = ((center_x - x0) ** 2 + (center_y - y0) ** 2) ** 0.5
-            # 归一化：净位移 / 身高 / 窗口帧数（即"每帧净前进速率"）
-            win_speed = win_net / (person_height * span_frames)
-            # 尺度因子：把"每帧净前进速率"映射到原 motion 的量纲，
-            # 使既有阈值（enter 0.005 / exit 0.0015）语义保持可比
-            speed = max(speed, win_speed * self.motion_window_gain)
+            if win_net > 0:
+                win_speed = win_net / (person_height * span_samples)
+                speed = win_speed * self.motion_window_gain
 
         current["speed"] = 0.65 * prev.get("speed", 0.0) + 0.35 * speed
         self.track_motion[track_id] = current

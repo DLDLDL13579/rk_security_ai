@@ -181,14 +181,23 @@ class LocomotionEngine:
             and model_score >= self.model_lead_score
         )
         if model_lead:
-            # TCN 高置信主导（模型 17.7k 序列重训后序列级 100% 准确）
-            # === LOCO_DISPLACEMENT_PATCH (2026-09-30) ===
-            # 原实现在此之后还有一行无条件 `want_standing = motion <= exit_motion`
-            # 把模型主导结论覆盖掉（用户实测"脚不可见就被判站立"的直接根因）。
-            # 现改为：模型说 walking 时，位移仍需达到退出门（人站着不动而模型
-            # 偶发报 walking 时不采纳）；模型说 standing 时直接采纳。
+            # === LOCO_MODEL_LEAD_GATE_PATCH (2026-09-30) ===
+            # TCN 高置信主导，但必须过位移门。
+            #
+            # 实测问题（用户第二次反馈"站立不动仍判 walking"）：
+            #   原实现在此用 exit_motion(0.02) 作门槛，而 exit 是「保持门」，
+            #   比进入门 enter(0.05) 宽松得多。实机检测框抖动峰值可达
+            #   0.018~0.024，正好卡在 0.02 之上 → 模型每帧报 walking 时
+            #   就被放行（日志显示 walking 的 score 恒为 1.00，即模型分数）。
+            #
+            # 修法：区分「进入」与「保持」两种语义——
+            #   当前不是 walking：必须跨过 enter_motion(0.05) 才允许进入
+            #   当前已是 walking：用 exit_motion(0.02) 保持，避免脚步间隙误退出
             if model_action == "walking":
-                want_walking = motion >= self.exit_motion
+                if state["action"] == "walking":
+                    want_walking = motion >= self.exit_motion
+                else:
+                    want_walking = motion >= self.enter_motion
             else:
                 want_walking = False
             want_standing = (model_action == "standing") and not want_walking

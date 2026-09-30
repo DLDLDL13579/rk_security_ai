@@ -259,14 +259,18 @@ def main():
     )
 
     # 真实行走：bbox 持续位移 + 步态
+    # 注意（2026-09-30 修正）：motion 量纲已随 WINDOW_NET_DISP_PATCH 变更，
+    # 新量纲 = 窗口净位移速率 ×15，进入门槛 0.05（原 0.005，旧量纲）。
+    # 此处取 0.30 对应"正常行走 8px/帧"，与原用例 0.012 的语义等价（0.012×15≈0.18），
+    # 但留足余量以明确覆盖门槛。
     eng4 = LE()
     walk_kpts = [make_kpts(ankle_v=1.0) for _ in range(12)]
     for i, k in enumerate(walk_kpts[:-1]):
-        eng4.resolve(track_id=6, motion=0.012, pose_energy=0.02,
+        eng4.resolve(track_id=6, motion=0.30, pose_energy=0.02,
                      pose_quality=0.9, keypoints=k,
                      model_action="walking", model_score=0.99)
     r5 = eng4.resolve(
-        track_id=6, motion=0.012, pose_energy=0.02,  # 持续位移
+        track_id=6, motion=0.30, pose_energy=0.02,  # 持续位移（新量纲）
         pose_quality=0.9, keypoints=walk_kpts[-1],
         model_action="walking", model_score=0.99,
     )

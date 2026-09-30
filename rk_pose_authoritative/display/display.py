@@ -1,5 +1,9 @@
 import os
 import cv2
+import os
+
+# === DISPLAY_FULLSCREEN_PATCH (2026-09-30) ===
+WINDOW_NAME = "RK3588 Smart Security"
 import time
 
 
@@ -31,10 +35,19 @@ KP_VIS_THRESHOLD = 0.3              # 关键点可见性阈值
 
 
 class DisplayThread:
-    def __init__(self, shared, width=960, height=540):
+    def __init__(self, shared, width=None, height=None):
         self.shared = shared
-        self.width = width
-        self.height = height
+        # === DISPLAY_FULLSCREEN_PATCH (2026-09-30) ===
+        # 板端 HDMI 显示：默认按屏幕分辨率铺满（1920x1080），可用环境变量覆盖。
+        # 原默认 960x540 会在 1080p 屏上留出大片桌面。
+        _dw = int(os.environ.get("RK_DISPLAY_WIDTH", "1920"))
+        _dh = int(os.environ.get("RK_DISPLAY_HEIGHT", "1080"))
+        self.width = _dw if width is None else width
+        self.height = _dh if height is None else height
+        self.fullscreen = os.environ.get(
+            "RK_DISPLAY_FULLSCREEN", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self._window_ready = False
 
         self.last_time = time.time()
         self.fps = 0.0
@@ -134,6 +147,18 @@ class DisplayThread:
         lag = min(self.predict_lag_frames, float(lag_frames) + 0.6)
         dx = mem["vx"] * lag
         dy = mem["vy"] * lag
+
+        # === PREDICT_CLAMP_PATCH_20260930 ===
+        # 外推位移上限：不超过框自身尺寸的一半，且不超过画面尺寸的 1/8。
+        # 原实现无上限，人快速走动时框被推出屏幕外（用户实测反馈）。
+        box_w = max(1.0, x2 - x1)
+        box_h = max(1.0, y2 - y1)
+        max_dx = min(box_w * 0.5, self.width / 8.0)
+        max_dy = min(box_h * 0.5, self.height / 8.0)
+        if abs(dx) > max_dx:
+            dx = max_dx if dx > 0 else -max_dx
+        if abs(dy) > max_dy:
+            dy = max_dy if dy > 0 else -max_dy
 
         return [
             x1 + dx,
@@ -259,8 +284,15 @@ class DisplayThread:
             thickness,
         )
 
-        label_top = max(0, y1 - th - 12)
-        label_bottom = min(self.height - 1, y1)
+        # === LABEL_INSIDE_PATCH_20260930 ===
+        # 原实现把标签画在框上方（y1 - th - 12）。人位于画面顶部时 y1 很小，
+        # 标签被 clamp 到 0 后遭画面顶部裁掉 —— 用户看不到行为识别结果。
+        # 改为画在「框内顶端」：框内必然可见。框过矮时退化为框内底部。
+        if (y2 - y1) >= (th + 14):
+            label_top = y1 + 4            # 框内顶端
+        else:
+            label_top = max(y1, y2 - th - 6)   # 框太矮 → 框内底部
+        label_bottom = min(self.height - 1, label_top + th + 10)
         # 修正：标签起点也要 clamp，否则人在画面右侧时文字被右边缘裁掉
         # （2026-09-28 修复：原来只 clamp 右边界，导致可用宽度不足）
         box_w = tw + 10
@@ -355,7 +387,19 @@ class DisplayThread:
                     self.video_writer.write(show)
                 time.sleep(0.005)
             else:
-                cv2.imshow("RK3588 Smart Security", show)
+                # === DISPLAY_FULLSCREEN_PATCH (2026-09-30) ===
+                # 首次显示前创建全屏窗口，让画面铺满 HDMI 屏
+                if not self._window_ready:
+                    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+                    if self.fullscreen:
+                        cv2.setWindowProperty(
+                            WINDOW_NAME,
+                            cv2.WND_PROP_FULLSCREEN,
+                            cv2.WINDOW_FULLSCREEN,
+                        )
+                    self._window_ready = True
+
+                cv2.imshow(WINDOW_NAME, show)
                 key = cv2.waitKey(1)
                 if key == 27:
                     self.shared.running = False

@@ -125,7 +125,10 @@ class LocomotionEngine:
             state["kpts_history"].append(keypoints)
 
         points = list(state["kpts_history"])
-        amp = ankle_amp(points)
+        # === VISIBILITY_MASK_PATCH (2026-09-30) ===
+        # ankle_amp 现在返回 (amp, n_samples)：不可见帧被丢弃，
+        # n_samples 不足时视为"无步态证据"（原实现用假坐标算出垃圾 amp）
+        amp, gait_samples = ankle_amp(points)
         cad = cadence(points)
 
         if pose_quality < self.min_pose_quality:
@@ -144,6 +147,11 @@ class LocomotionEngine:
             and model_score >= self.walk_hint_score
         )
 
+        # === VISIBILITY_MASK_PATCH (2026-09-30) ===
+        # 有效样本不足 3 帧时，amp/cad 是残缺数据，一律视为无步态证据
+        gait_ev = gait_ev and gait_samples >= 3
+        gait_ev_strong = gait_ev_strong and gait_samples >= 3
+
         # 小尺寸人物裁剪下 pose_energy 噪声可达 0.05~0.3（远超静止阈值），
         # 不再作为行走触发；行走以 bbox 位移为准。
         # 步态证据必须通过踝关节可见性门：踝点不可见时，amp 是关键点失败/幻觉
@@ -158,6 +166,7 @@ class LocomotionEngine:
         gait_valid = (
             ankle_vis >= self.ankle_vis_threshold
             and amp <= 1.0
+            and gait_samples >= 3
         )
         gait_trusted = gait_valid and gait_ev and (
             motion >= self.exit_motion or gait_ev_strong
@@ -174,18 +183,31 @@ class LocomotionEngine:
             and model_score >= self.model_lead_score
         )
         if model_lead:
-            want_walking = (model_action == "walking")
-            want_standing = (model_action == "standing")
+            # TCN 高置信主导（模型 17.7k 序列重训后序列级 100% 准确）
+            # === LOCO_DISPLACEMENT_PATCH (2026-09-30) ===
+            # 原实现在此之后还有一行无条件 `want_standing = motion <= exit_motion`
+            # 把模型主导结论覆盖掉（用户实测"脚不可见就被判站立"的直接根因）。
+            # 现改为：模型说 walking 时，位移仍需达到退出门（人站着不动而模型
+            # 偶发报 walking 时不采纳）；模型说 standing 时直接采纳。
+            if model_action == "walking":
+                want_walking = motion >= self.exit_motion
+            else:
+                want_walking = False
+            want_standing = (model_action == "standing") and not want_walking
         else:
             # 回退：原几何/运动判据（TCN 序列未攒满或低置信时）
+            # === LOCO_DISPLACEMENT_PATCH ===
+            # 行走 = 位移为主证据 + 步态为辅证。
+            # 原实现 gait_ev_strong 可单独触发 walking（抖腿时 bbox 不动、
+            # 踝摆大 → 误判行走，用户实测反馈）。现要求位移必然成立：
+            # 抖腿无根部位移，motion < exit_motion，不可能进入 walking。
             want_walking = (
                 motion_ev
-                and (gait_trusted or (model_ev and amp >= self.gait_amp))
+                and (gait_trusted or (model_ev and gait_ev))
             )
             want_standing = motion <= self.exit_motion
 
-        # 站立以 bbox 位移为准（最可靠信号），不再要求姿态能量/踝摆低于噪声地板
-        want_standing = motion <= self.exit_motion
+        # （原第 188 行的无条件覆盖已删除 —— 它曾把 model_lead 分支的结论覆盖掉）
 
         if want_walking and want_standing and not model_lead:
             # 冲突时以更直接的位移证据为准（仅几何回退路径）

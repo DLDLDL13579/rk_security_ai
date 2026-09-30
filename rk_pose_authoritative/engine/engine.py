@@ -261,6 +261,8 @@ class PoseEngine:
             bbox=person.bbox,
             keypoints=keypoints,
             geometry=geometry,
+            # POST_FALL_PHASE_PATCH: 后跌倒阶段按帧号计时（评估/实时口径一致）
+            frame_id=frame_id,
         )
 
         locomotion_result = self.locomotion_engine.resolve(

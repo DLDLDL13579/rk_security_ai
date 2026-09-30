@@ -355,8 +355,13 @@ class PoseRKNN:
     # ========================================================
 
     def convert17to33(self, pts):
+        # === SKELETON_PATCH_20260930 ===
+        # 原实现把 33 个占位点初始化为 (0,0) 且 visibility=1.0。
+        # 由于实际只填 17 个点，剩余 16 个「(0,0) 且可见」的点会被 draw_skeleton
+        # 当作真实关节点与人体连线，导致画面左上角出现长线。
+        # 改为 visibility=0.0：既是「不可见」的正确语义，也让绘制端自动跳过。
         result = [
-            Landmark(0, 0, 0, 1.0)
+            Landmark(0, 0, 0, 0.0)
             for _ in range(33)
         ]
         mapping = {
@@ -367,15 +372,15 @@ class PoseRKNN:
         }
         for src, dst in mapping.items():
             result[dst] = pts[src]
-        # 填充缺失点（沿用上一个可见点）
+        # 填充缺失点：继承上一个「可见」点的坐标以避免骨架断裂，
+        # 但保持 visibility=0.0 —— 让绘制端知道这不是真实关节点（原实现填 1.0 是错的）。
+        # === SKELETON_PATCH_20260930 ===
+        last_visible = None
         for i in range(33):
-            if result[i].visibility <= 0:
-                result[i] = Landmark(
-                    result[i - 1].x,
-                    result[i - 1].y,
-                    0,
-                    1.0,
-                )
+            if result[i].visibility > 0:
+                last_visible = result[i]
+            elif last_visible is not None:
+                result[i] = Landmark(last_visible.x, last_visible.y, 0.0, 0.0)
         return result
 
     # ========================================================

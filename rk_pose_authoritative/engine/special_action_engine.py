@@ -13,7 +13,13 @@ TCN 置信度作为加速确认的先验，避免五分类模型边界互相挤�
 """
 
 import os
+import time
 from collections import deque
+
+
+def _now():
+    """POST_FALL_PHASE_PATCH 用：单调时钟（不受系统改时间影响）"""
+    return time.monotonic()
 
 
 class SpecialActionEngine:
@@ -82,12 +88,30 @@ class SpecialActionEngine:
             0,
             int(os.environ.get("RK_SPECIAL_HOLD_FRAMES", "6")),
         )
+        # === POST_FALL_PHASE_PATCH (2026-09-30) ===
+        # 后跌倒阶段确认时长：帧数口径（与视频帧率挂钩，评估/实时一致）
+        # 视频 25fps × 3 秒 = 75 帧；墙钟秒数仅作 frame_id 缺失时的兜底
+        self.fall_confirm_seconds = float(
+            os.environ.get("RK_SPECIAL_FALL_CONFIRM_SECONDS", "3.0")
+        )
+        self.fall_confirm_frames = max(
+            3,
+            int(
+                os.environ.get(
+                    "RK_SPECIAL_FALL_CONFIRM_FRAMES",
+                    str(int(round(self.fall_confirm_seconds * 25))),
+                )
+            ),
+        )
+        # 后跌倒阶段状态机: track_id -> {"phase","since","hits","misses"}
+        self.post_fall = {}
         self.states = {}
 
         print("[SpecialAction] Ready (geometry + TCN prior)")
 
     def clear_track(self, track_id):
         self.states.pop(track_id, None)
+        self.post_fall.pop(track_id, None)
 
     def _geometry_candidate(self, geometry, bbox):
         if geometry is None:
@@ -96,21 +120,32 @@ class SpecialActionEngine:
         bbox_h = max(1.0, float(bbox[3] - bbox[1]))
         bbox_ratio = bbox_w / bbox_h
 
+        # === VISIBILITY_MASK_PATCH (2026-09-30) ===
+        # squat/bend 依赖膝角 → 要求膝角可信（髋膝踝可见），否则跳过：
+        # 用户实测"识别不到脚就被判下蹲"的直接根因。
+        knee_ok = geometry.get("knee_valid", False)
+        torso_ok = geometry.get("torso_valid", False)
+
         if (
-            geometry.get("torso_tilt", 0.0) >= self.fall_tilt
+            torso_ok
+            and geometry.get("torso_tilt", 0.0) >= self.fall_tilt
             and geometry.get("hip_drop", 1.0) <= self.fall_drop
             and bbox_ratio >= self.fall_bbox_ratio
         ):
             return "fall_down"
         if (
-            geometry.get("knee_mean", 180.0) <= self.squat_knee
+            knee_ok
+            and geometry.get("knee_mean", 180.0) <= self.squat_knee
+            and torso_ok
             and geometry.get("torso_tilt", 0.0) <= self.squat_tilt
         ):
             return "squat"
         if (
-            self.bend_tilt_lo
+            torso_ok
+            and self.bend_tilt_lo
             <= geometry.get("torso_tilt", 0.0)
             <= self.bend_tilt_hi
+            and knee_ok
             and geometry.get("knee_mean", 180.0) >= self.bend_knee
         ):
             return "bend"
@@ -118,16 +153,26 @@ class SpecialActionEngine:
 
     def _geometry_partial(self, geometry, bbox):
         """半匹配候选：遮挡/非标准动作下放宽阈值，输出动作（后续标记 partial）。
-        仅覆盖 squat/bend；fall 保持严格（必须完整几何，防误报）。"""
+        仅覆盖 squat/bend；fall 保持严格（必须完整几何，防误报）。
+
+        === VISIBILITY_MASK_PATCH (2026-09-30) ===
+        partial 是放宽路径，同样要求膝角/躯干的基本可信，否则放宽无意义
+        （放宽建立在垃圾数据上 = 误报制造机）。"""
         if geometry is None:
             return None
         tilt = geometry.get("torso_tilt", 0.0)
         knee = geometry.get("knee_mean", 180.0)
-        if knee <= self.squat_knee * 1.30 and tilt <= self.squat_tilt * 1.35:
+        knee_ok = geometry.get("knee_valid", False)
+        torso_ok = geometry.get("torso_valid", False)
+        if not (knee_ok or torso_ok):
+            return None
+        if knee_ok and knee <= self.squat_knee * 1.30 and torso_ok and tilt <= self.squat_tilt * 1.35:
             return "squat"
         if (
-            tilt >= self.bend_tilt_lo * 0.75
+            torso_ok
+            and tilt >= self.bend_tilt_lo * 0.75
             and tilt <= self.bend_tilt_hi * 1.15
+            and knee_ok
             and knee >= self.bend_knee * 0.88
         ):
             return "bend"
@@ -142,6 +187,7 @@ class SpecialActionEngine:
         bbox=None,
         keypoints=None,
         geometry=None,
+        frame_id=None,
     ):
         if bbox is None:
             bbox = [0, 0, 1, 1]
@@ -173,8 +219,12 @@ class SpecialActionEngine:
         bbox_ratio = bbox_w / bbox_h
         h_hist.append(bbox_h)
 
+        # === VISIBILITY_MASK_PATCH (2026-09-30) ===
+        # 躯干四点（肩髋）不可见时 torso_tilt/hip_drop 是假数据 → 不得作为
+        # 跌倒几何证据（原来不查，遮挡时误判跌倒）
+        torso_ok = geometry is not None and geometry.get("torso_valid", False)
         fall_geo = (
-            geometry is not None
+            torso_ok
             and geometry.get("torso_tilt", 0.0) >= self.fall_tilt
             and geometry.get("hip_drop", 1.0) <= self.fall_drop
             and bbox_ratio >= self.fall_bbox_ratio
@@ -185,9 +235,64 @@ class SpecialActionEngine:
             and (sorted(h_hist)[len(h_hist) // 2] / bbox_h) >= self.fall_height_drop
             and bbox_ratio >= 0.85
         )
+        # 瞬态跌倒特征（用于进入"候选"状态，尚不确认）
+        fall_instant = fall_geo or fall_temporal
+
+        # === POST_FALL_PHASE_PATCH (2026-09-30) ===
+        # 调研依据（Igual et al. 2013 综述）：跌倒检测须区分"只检测冲击"与
+        # "同时检测后跌倒阶段"。坐下/蹲下/弯腰都是瞬态——特征命中后人会
+        # 重新起身/稳定；真实跌倒后人是【持续躺地不起】。
+        # 用户实测痛点：坐着办公被反复误判跌倒（88 次/30 分钟）。
+        # 方案：跌倒不再单帧/短窗确认，改为状态机：
+        #   PHASE_CANDIDATE: 瞬态特征命中 → 开始计时
+        #   PHASE_ONGOING  : 特征持续满足（躺地状态保持）→ 计满确认时长才确认
+        #   立起/特征消失   → 清零回 idle
+        #
+        # 【计时口径：帧号差而非墙钟】——2026-09-30 评估实测教训：
+        # 首次实现用 time.monotonic() 计 3 秒，但离线评估是【全速播放】，
+        # 20 秒的视频几秒就跑完 → 墙钟永远到不了 3 秒 → 跌倒全部漏报
+        # （SE 从 80% 崩到 30%）。改为按 frame_id 差值计时：视频 25fps，
+        # 3 秒 = 75 帧，评估与实时下含义一致。
+        pf = self.post_fall.setdefault(
+            track_id, {"phase": "idle", "since": None, "hits": 0, "misses": 0}
+        )
+        if fall_instant:
+            if pf["phase"] != "ongoing":
+                pf["phase"] = "candidate"
+                if pf["since"] is None:
+                    pf["since"] = frame_id if frame_id else 0
+                    pf["since_wall"] = _now()
+                pf["hits"] += 1
+            # ongoing / candidate 状态下持续命中都累计
+            if pf["phase"] in ("candidate", "ongoing"):
+                # 帧号差计时（主）+ 墙钟兜底（frame_id 缺失时退化）
+                base = pf.get("since")
+                if base:
+                    elapsed_frames = max(0, (frame_id or 0) - base)
+                    enough = elapsed_frames >= self.fall_confirm_frames
+                else:
+                    wall = pf.get("since_wall") or _now()
+                    enough = (_now() - wall) >= self.fall_confirm_seconds
+                if enough:
+                    pf["phase"] = "ongoing"
+                    pf["misses"] = 0
+        else:
+            # 特征消失：若从未到 ongoing 则回 idle（瞬态=坐下/弯腰，不是跌倒）
+            if pf["phase"] == "candidate":
+                pf["phase"] = "idle"
+                pf["since"] = None
+                pf["hits"] = 0
+            elif pf["phase"] == "ongoing":
+                # 已确认的跌倒，特征短暂消失（遮挡）时保持 1 次宽容
+                pf["misses"] = pf.get("misses", 0) + 1
+                if pf["misses"] > 1:
+                    pf["phase"] = "idle"
+                    pf["since"] = None
+
+        fall_confirmed = pf["phase"] == "ongoing"
 
         geo_candidate = self._geometry_candidate(geometry, bbox)
-        if geo_candidate is None and (fall_geo or fall_temporal):
+        if geo_candidate is None and fall_confirmed:
             geo_candidate = "fall_down"
         model_action = action if action in self.score_thresholds else ""
         model_ok = (
@@ -216,6 +321,30 @@ class SpecialActionEngine:
         elif partial_candidate is not None:
             candidate = partial_candidate
             is_partial = True
+
+        # === POST_FALL_PHASE_PATCH (2026-09-30) ===
+        # 模型主导的 fall_down 同样要过后跌倒阶段门：
+        # 重训后的 TCN 对"坐下/躺椅子"会输出饱和置信度的 fall_down（实测
+        # walking 0.96~1.00 之间紧邻一次 fall_down 0.99 的抖动，以及坐着
+        # 办公时 88 次误报）——单帧模型结论不可作为跌倒的充分证据。
+        # 只有"持续躺地 ≥ fall_confirm_seconds"才确认跌倒。
+        if candidate == "fall_down" and not fall_confirmed:
+            # 特征已命中但还没持续够确认时长 → 不输出（避免坐下/弯腰误报）
+            # 模型高置信 + 已持续 40% 时长 → 允许提前确认（模型与几何双证据
+            # 都指向跌倒，且已持续约 1.2 秒）
+            base = pf.get("since")
+            if base:
+                elapsed = max(0, (frame_id or 0) - base)
+                early_ok = model_lead and elapsed >= self.fall_confirm_frames * 0.4
+            else:
+                wall = pf.get("since_wall") or _now()
+                early_ok = (
+                    model_lead
+                    and (_now() - wall) >= self.fall_confirm_seconds * 0.4
+                )
+            if not early_ok:
+                self.states.pop(track_id, None)
+                return None
 
         # 几何门仅对"非模型主导"的 fall_down 生效（模型主导时信任模型输出）
         if candidate == "fall_down" and not model_lead and geo_candidate != "fall_down":

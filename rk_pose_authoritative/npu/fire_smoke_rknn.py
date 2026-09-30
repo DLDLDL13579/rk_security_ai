@@ -37,7 +37,7 @@ class FireSmokeRKNN:
     # ← 按模型元数据 names={0:'smoke', 1:'fire'} 的真实顺序
     CLASS_NAMES = ["smoke", "fire"]
     INPUT_SIZE = 640
-    CONF_THRESH = 0.25   # 与前人 test_smoke_fire.py 保持一致
+    CONF_THRESH = 0.50   # 方案 A：0.25→0.50 抑制背景误报（实测误报分数 0.25-0.35）
     NMS_THRESH = 0.50
 
     def __init__(self, model_path, conf_thresh=None, nms_thresh=None):

@@ -47,6 +47,9 @@ class SecurityMonitor:
         fire_smoke_cooldown=1.5,
         event_hold_seconds=4.0,
         max_recent_events=6,
+        fall_confirm_frames=3,
+        fire_smoke_confirm_frames=3,
+        confirm_reset_gap=1.5,
     ):
         self.fall_confidence = float(fall_confidence)
         self.zone_cooldown = float(zone_cooldown)
@@ -54,6 +57,24 @@ class SecurityMonitor:
         self.fire_smoke_cooldown = float(fire_smoke_cooldown)
         self.event_hold_seconds = float(event_hold_seconds)
         self.max_recent_events = int(max_recent_events)
+
+        # === 误报抑制（方案 A，2026-09-30）===
+        # 实测问题：60 秒内误报 4 次（跌倒 1、烟雾 2、火焰 1）。
+        # 根因：单帧抖动即触发（日志见 walking 0.96→1.00 之后紧跟一次 fall_down 0.88）。
+        # 策略：要求「连续 N 帧」命中才确认，且帧间间隔超过 confirm_reset_gap 则清零计数。
+        # 真实事件通常持续多帧（跌倒至少数秒），瞬时抖动无法通过连续帧确认。
+        self.fall_confirm_frames = max(1, int(fall_confirm_frames))
+        self.fire_smoke_confirm_frames = max(1, int(fire_smoke_confirm_frames))
+        self.confirm_reset_gap = float(confirm_reset_gap)
+
+        # track_id -> 连续命中状态
+        self._fall_streak = {}          # {"count": int, "last_ts": float, "max_score": float}
+        self._fire_smoke_streak = {}    # (label, key) -> {"count","last_ts","max_score","item"}
+        self.stats_suppressed = {       # 被连续性过滤挡掉的次数（可观测性）
+            EVENT_FALL: 0,
+            EVENT_FIRE: 0,
+            EVENT_SMOKE: 0,
+        }
 
         self.zone_manager = ZoneManager(zones or [])
         self.event_manager = SecurityEventManager(default_cooldown=3.0)
@@ -114,7 +135,7 @@ class SecurityMonitor:
             event = self.event_manager.emit(item, now=now, cooldown=self.zone_cooldown)
             self._append_event(event_output, event)
 
-        # ---- 跌倒 ----
+        # ---- 跌倒（需连续 N 帧确认，抑制瞬时抖动误报）----
         if isinstance(behaviors, dict):
             for pid, behavior in behaviors.items():
                 if not isinstance(behavior, dict):
@@ -126,7 +147,12 @@ class SecurityMonitor:
                         behavior.get("score", behavior.get("behavior_score", 0.0)),
                     )
                 )
+
+                # 未命中：不计入连续帧
                 if action != "fall_down" or score < self.fall_confidence:
+                    continue
+
+                if not self._confirm_fall(pid, score, now):
                     continue
 
                 self._merge_state(security_states, pid, "FALL")
@@ -141,16 +167,21 @@ class SecurityMonitor:
                         "person_id": pid,
                         "bbox": list(bbox or []),
                         "score": score,
+                        "confirmed_frames": self.fall_confirm_frames,
                     },
                     now=now,
                     cooldown=self.fall_cooldown,
                 )
                 self._append_event(event_output, event)
 
-        # ---- 烟火 ----
+        # ---- 烟火（同样需连续 N 帧确认）----
         for item in fire_smoke_objects:
             label = item["label"]
             event_name = EVENT_FIRE if label == "fire" else EVENT_SMOKE
+
+            if not self._confirm_fire_smoke(label, item, now):
+                continue
+
             event = self.event_manager.emit(
                 {
                     "event_type": event_name,
@@ -158,6 +189,7 @@ class SecurityMonitor:
                     "label": label,
                     "bbox": list(item["bbox"]),
                     "score": float(item["score"]),
+                    "confirmed_frames": self.fire_smoke_confirm_frames,
                 },
                 now=now,
                 cooldown=self.fire_smoke_cooldown,
@@ -178,6 +210,67 @@ class SecurityMonitor:
                 self.stats[etype] += 1
 
         return security_states, event_output
+
+    # ------------------------------------------------------------------
+    # 误报抑制：连续帧确认（方案 A，2026-09-30）
+    # ------------------------------------------------------------------
+    def _confirm_fall(self, pid, score, now):
+        """
+        跌倒连续帧确认：同一 track 连续 N 帧判定为 fall_down 才放行。
+
+        返回 True 表示本次可以发事件（同时清零计数，回到冷却周期语义）。
+        """
+        state = self._fall_streak.get(pid)
+        if state is None or (now - state["last_ts"]) > self.confirm_reset_gap:
+            state = {"count": 0, "last_ts": now, "max_score": 0.0}
+
+        state["count"] += 1
+        state["last_ts"] = now
+        state["max_score"] = max(state["max_score"], float(score))
+        self._fall_streak[pid] = state
+
+        if state["count"] >= self.fall_confirm_frames:
+            self._fall_streak.pop(pid, None)   # 已确认，重置计数
+            return True
+
+        self.stats_suppressed[EVENT_FALL] += 1
+        return False
+
+    def _confirm_fire_smoke(self, label, item, now):
+        """烟火连续帧确认：同一目标连续 N 帧命中才放行。"""
+        # 位置量化成网格作为目标标识，避免逐帧 bbox 微抖动导致无法累计
+        bbox = item.get("bbox") or [0, 0, 0, 0]
+        gx = int((float(bbox[0]) + float(bbox[2])) / 2.0 / 64)
+        gy = int((float(bbox[1]) + float(bbox[3])) / 2.0 / 64)
+        key = (label, gx, gy)
+
+        state = self._fire_smoke_streak.get(key)
+        if state is None or (now - state["last_ts"]) > self.confirm_reset_gap:
+            state = {"count": 0, "last_ts": now, "max_score": 0.0, "item": None}
+
+        state["count"] += 1
+        state["last_ts"] = now
+        state["item"] = item
+        state["max_score"] = max(state["max_score"], float(item.get("score", 0.0)))
+        self._fire_smoke_streak[key] = state
+
+        # 清理过期 streak，防止长期运行内存增长
+        if len(self._fire_smoke_streak) > 64:
+            stale = [
+                k for k, v in self._fire_smoke_streak.items()
+                if (now - v["last_ts"]) > self.confirm_reset_gap * 4
+            ]
+            for k in stale:
+                self._fire_smoke_streak.pop(k, None)
+
+        if state["count"] >= self.fire_smoke_confirm_frames:
+            self._fire_smoke_streak.pop(key, None)
+            return True
+
+        self.stats_suppressed[
+            EVENT_FIRE if label == "fire" else EVENT_SMOKE
+        ] += 1
+        return False
 
     # ------------------------------------------------------------------
     def _merge_state(self, base_state, pid, alert_name, zone_name=""):

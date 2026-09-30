@@ -20,6 +20,11 @@
 import threading
 import time
 
+from engine.attendance_monitor import (
+    AttendanceMonitor,
+    EVENT_OFF_DUTY,
+    EVENT_SLEEPING,
+)
 from engine.fire_smoke_detector import NullFireSmokeDetector
 from engine.security_event_manager import SecurityEventManager
 from engine.zone_manager import ZoneManager
@@ -30,6 +35,9 @@ EVENT_INTRUSION = "INTRUSION_DETECTED"
 EVENT_LOITERING = "LOITERING_DETECTED"
 EVENT_FIRE = "FIRE_DETECTED"
 EVENT_SMOKE = "SMOKE_DETECTED"
+# 办公区新增（2026-09-30）：离岗、睡岗
+EVENT_OFF_DUTY = EVENT_OFF_DUTY
+EVENT_SLEEPING = EVENT_SLEEPING
 
 # 三类安防事件 → 上报用的告警类型（与平台历史数据字段对齐）
 SECURITY_EVENT_TYPES = (EVENT_FALL, EVENT_INTRUSION, EVENT_LOITERING)
@@ -79,6 +87,11 @@ class SecurityMonitor:
         self.zone_manager = ZoneManager(zones or [])
         self.event_manager = SecurityEventManager(default_cooldown=3.0)
 
+        # === 办公区在岗事件（2026-09-30）===
+        # 离岗（工位 30 分钟无人）+ 睡岗（静止 5 分钟 + 伏案姿态）
+        # 与跌倒/烟火一样走事件式：满足完整判据才产生一次告警，带冷却去重。
+        self.attendance = AttendanceMonitor()
+
         self.recent_events = []
         self.last_event_signature = None
         self.stats = {
@@ -87,6 +100,8 @@ class SecurityMonitor:
             EVENT_LOITERING: 0,
             EVENT_FIRE: 0,
             EVENT_SMOKE: 0,
+            EVENT_OFF_DUTY: 0,
+            EVENT_SLEEPING: 0,
         }
 
     # ------------------------------------------------------------------
@@ -196,6 +211,29 @@ class SecurityMonitor:
             )
             self._append_event(event_output, event)
 
+        # ---- 离岗 / 睡岗（办公区在岗事件，2026-09-30 新增）----
+        # 这两个判据的时长是【真实时间】（30 分钟 / 5 分钟），故用墙钟 now，
+        # 与跌倒的"帧号计时"不同 —— 后者是为了适配离线评估的全速播放。
+        # 离岗/睡岗只在实时监控场景使用，不受播放速度影响。
+        if getattr(self, "attendance", None) is not None:
+            try:
+                office_events = self.attendance.evaluate_off_duty(
+                    self.zone_manager.zones, detections, now=now
+                )
+                office_events += self.attendance.evaluate_sleeping(
+                    detections,
+                    behaviors,
+                    keypoints_map=self._extract_keypoints(behaviors),
+                    now=now,
+                )
+            except Exception as exc:
+                print(f"[Security] 在岗事件判定异常: {exc}")
+                office_events = []
+
+            for item in office_events:
+                # 在岗事件已有自己的冷却，这里不再叠加事件管理器的冷却
+                self._append_event(event_output, dict(item, ts=now))
+
         # ---- 维护近期事件窗口（供显示/上报使用） ----
         self.recent_events.extend(event_output)
         self.recent_events = [
@@ -210,6 +248,17 @@ class SecurityMonitor:
                 self.stats[etype] += 1
 
         return security_states, event_output
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_keypoints(behaviors):
+        """从 behaviors 中提取每人的关键点（供睡岗姿态判据使用）"""
+        out = {}
+        if isinstance(behaviors, dict):
+            for pid, beh in behaviors.items():
+                if isinstance(beh, dict) and beh.get("keypoints"):
+                    out[pid] = beh.get("keypoints")
+        return out
 
     # ------------------------------------------------------------------
     # 误报抑制：连续帧确认（方案 A，2026-09-30）

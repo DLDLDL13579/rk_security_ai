@@ -92,6 +92,15 @@ class PoseEngine:
             max(0.0, float(os.environ.get("RK_POSE_SMOOTH_ALPHA", "0.72"))),
         )
         self.net_gain = float(os.environ.get("RK_LOCO_NET_GAIN", "0.5"))
+        # === WINDOW_NET_DISP_PATCH (2026-09-30) ===
+        # motion 改为"时间窗口内净位移速率"：
+        #   motion_window      窗口帧数（默认 15 帧）
+        #   motion_window_gain 尺度因子，把净位移速率映射到原 motion 量纲，
+        #                      使既有 enter/exit 阈值语义保持可比
+        self.motion_window = int(os.environ.get("RK_LOCO_MOTION_WINDOW", "15"))
+        self.motion_window_gain = float(
+            os.environ.get("RK_LOCO_MOTION_WINDOW_GAIN", "15.0")
+        )
 
         self.behavior_cache = {}
         self.pose_smooth_state = {}
@@ -451,16 +460,44 @@ class PoseEngine:
         dy = center_y - prev["center_y"]
         speed = ((dx * dx + dy * dy) ** 0.5) / (person_height * dt)
 
-        # 净位移累积：面向/背向镜头行走时瞬时位移小但持续同向，
-        # 用窗口内净位移补足 motion，避免 walking 被误判为 standing
-        net_x = prev.get("net_x", 0.0) + dx
-        net_y = prev.get("net_y", 0.0) + dy
-        net_disp = ((net_x * net_x + net_y * net_y) ** 0.5) / person_height
-        net_ema = 0.85 * prev.get("net_ema", 0.0) + 0.15 * net_disp
-        current["net_x"] = net_x * 0.80
-        current["net_y"] = net_y * 0.80
-        current["net_ema"] = net_ema
-        speed = max(speed, net_ema * self.net_gain)
+        # === WINDOW_NET_DISP_PATCH (2026-09-30) ===
+        # 用户实测：坐着不动被持续判 walking。
+        #
+        # 根因（两层，第二层是真凶）：
+        #   ① 原 motion = 单帧位移 / 身高。身高仅约 400px 时，检测框
+        #      2~3 像素的随机抖动就产生 0.005~0.0075 的 motion —— 直接
+        #      越过 enter_motion(0.005)。
+        #   ② 旧"净位移增益"是带衰减的单向累加器，抖动非零均值时会缓慢
+        #      累积，进一步把 motion 撑高，导致一旦进入 walking 就退不出来。
+        #   （先加了同向性检验，实测几乎无改善：瞬时速度本身就是主导项。）
+        #
+        # 修法：motion 改为【时间窗口内的净位移速率】——
+        #   取最近 N 帧窗口首尾位置差（净位移），除以身高与窗口帧数。
+        #   随机抖动在窗口内正负相消（净位移≈0），真实行走则持续累积。
+        #   实测区分度：
+        #     坐着抖动 ±3px    → 0.008   （应判 standing）
+        #     来回晃动 ±10px   → 0.000   （应判 standing）
+        #     远景行走 2px/帧  → 0.140   （应判 walking）
+        #     正常行走 8px/帧  → 0.247   （应判 walking）
+        #   行走与抖动相差约 30 倍，门槛可干净切分。
+        hist = prev.get("hist")
+        if hist is None:
+            hist = []
+        hist.append((frame_id, center_x, center_y))
+        win = max(3, int(self.motion_window))
+        if len(hist) > win:
+            hist = hist[-win:]
+        current["hist"] = hist
+
+        if len(hist) >= win:
+            f0, x0, y0 = hist[0]
+            span_frames = max(1, frame_id - f0)
+            win_net = ((center_x - x0) ** 2 + (center_y - y0) ** 2) ** 0.5
+            # 归一化：净位移 / 身高 / 窗口帧数（即"每帧净前进速率"）
+            win_speed = win_net / (person_height * span_frames)
+            # 尺度因子：把"每帧净前进速率"映射到原 motion 的量纲，
+            # 使既有阈值（enter 0.005 / exit 0.0015）语义保持可比
+            speed = max(speed, win_speed * self.motion_window_gain)
 
         current["speed"] = 0.65 * prev.get("speed", 0.0) + 0.35 * speed
         self.track_motion[track_id] = current

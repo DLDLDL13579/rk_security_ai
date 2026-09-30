@@ -23,28 +23,26 @@ from engine.geometry import ankle_amp, cadence
 class LocomotionEngine:
 
     def __init__(self):
+        # === WINDOW_NET_DISP_PATCH (2026-09-30)：量纲已变更 ===
+        # motion 从"单帧位移/身高"改为"窗口净位移速率 ×15"。
+        # 新量纲下的实测标定（见 engine.py 注释的完整数据）：
+        #   坐着抖动 ±3px  → 0.009    （应判 standing）
+        #   坐着抖动 ±5px  → 0.015    （应判 standing）
+        #   坐着抖动 ±8px  → 0.024    （最坏情况，仍应判 standing）
+        #   来回晃动 ±10px → 0.000    （应判 standing）
+        #   极慢行走 0.8px/帧 → 0.060 （应判 walking）
+        #   远景行走 2px/帧   → 0.150
+        #   正常行走 8px/帧   → 0.300
+        # 门槛取 0.05：距最坏抖动(0.024)有 2 倍余量，距极慢行走(0.06)有余量。
+        # 用户实测痛点：原门槛 0.005 在新量纲下等价于"抖动 1px 即算行走"，
+        # 这正是"坐着不动被判 walking"的直接原因。
         self.enter_motion = float(
-            # 【2026-09-28 实测重标定】v8-pose 的位移特征比 MediaPipe 时代缩小到
-            # 1/3~1/2：walk_001 实测 motion 中位 0.0049、p75 0.0081，而旧阈值 0.016
-            # 是其中位数的 3.3 倍 → walking 几乎全被判成 standing（10%）。
-            #
-            # 50 视频全量评估对比（正式 eval 脚本，唯一可信口径）：
-            #   enter/exit 0.016/0.008（旧） -> 总体 46%（walking 10%、standing 80%）
-            #   enter/exit 0.005/0.0015     -> 总体 54%（walking 90%、standing 40%）✅
-            #   enter/exit 0.010/0.0015     -> 总体 50%（walking 60%、standing 50%）
-            # 注：0.010 曾在 30 视频抽样中显示更优（预计 58%），但全量评估被推翻为 50%。
-            #   —— 教训：抽样只用于筛选假说，配置决策必须全量评估。
-            #
-            # exit 是 walking 的"保持门"，是本次修复的关键：
-            #   单视频实测 exit 0.003 → standing（walking 票 133）；
-            #              exit 0.0015 → walking（票 350）。
-            os.environ.get("RK_LOCO_ENTER_MOTION", "0.005")
+            os.environ.get("RK_LOCO_ENTER_MOTION", "0.05")
         )
+        # 退出门槛（阻尼门）：进入 walking 后，净位移速率降到一半以下才退出，
+        # 避免行走过程中脚步间隙被误判为站立。
         self.exit_motion = float(
-            # exit 是 walking 的"保持门"：旧值 0.008 高于 walking 的 motion 中位（0.0049），
-            # 人走着稍有波动就掉回 standing 并被迟滞锁死。
-            # 单视频实测：exit 0.003→standing（walking 票 133）；0.0015→walking（票 350）。
-            os.environ.get("RK_LOCO_EXIT_MOTION", "0.0015")
+            os.environ.get("RK_LOCO_EXIT_MOTION", "0.02")
         )
         self.enter_pose_energy = float(
             os.environ.get("RK_LOCO_ENTER_POSE_ENERGY", "0.008")

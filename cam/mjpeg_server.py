@@ -43,6 +43,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
+import numpy as np
 
 DEFAULT_RTSP_MAIN = "rtsp://admin:GKFD13258@192.168.1.64:554/Streaming/Channels/101"
 DEFAULT_RTSP_SUB = "rtsp://admin:GKFD13258@192.168.1.64:554/Streaming/Channels/102"
@@ -97,6 +98,12 @@ class FrameHub:
         )
         self.annotated_active = False
         self.annotated_hits = 0
+        # 读共享帧时的转码参数（带宽适配）
+        self.annotated_resize = os.environ.get(
+            "CAM_ANNOTATED_RESIZE", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        self.annotated_width = int(os.environ.get("CAM_WIDTH", "960"))
+        self.annotated_quality = int(os.environ.get("CAM_QUALITY", "60"))
 
     # ------------------------------------------------------------------
     def _open(self):
@@ -208,6 +215,37 @@ class FrameHub:
                 jpeg = fh.read()
             if len(jpeg) < 128:
                 return True
+
+            # === 带宽适配（2026-09-30 卡顿修复）===
+            # 共享帧是板端显示分辨率（1920x1080，约 160KB/帧）。
+            # 若直接转发，12fps 需要 1.9MB/s，而弱 WiFi 实测仅约 200KB/s
+            # → 严重拥塞，浏览器只有 1~2 fps。此处按 CAM_WIDTH/CAM_QUALITY
+            # 重新编码，把带宽压到 WiFi 可承受范围。
+            if self.annotated_resize and (
+                self.annotated_width > 0 or self.annotated_quality != 75
+            ):
+                arr = np.frombuffer(jpeg, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is not None:
+                    if (
+                        self.annotated_width > 0
+                        and img.shape[1] != self.annotated_width
+                    ):
+                        h = int(
+                            round(
+                                img.shape[0]
+                                * self.annotated_width
+                                / float(img.shape[1])
+                            )
+                        )
+                        img = cv2.resize(img, (self.annotated_width, h))
+                    ok, buf = cv2.imencode(
+                        ".jpg",
+                        img,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), self.annotated_quality],
+                    )
+                    if ok:
+                        jpeg = buf.tobytes()
 
             with self.lock:
                 self._jpeg = jpeg

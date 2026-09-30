@@ -28,14 +28,42 @@ import time
 
 import cv2
 
-DEFAULT_MAIN = "rtsp://admin:GKFD13258@192.168.1.64:554/Streaming/Channels/101"
-DEFAULT_SUB = "rtsp://admin:GKFD13258@192.168.1.64:554/Streaming/Channels/102"
+# === 凭据处理（2026-09-30 安全整改）===
+# 原实现把摄像头账号密码明文硬编码在此，并随提交进入了公开仓库（属凭据泄露）。
+# 现改为从环境变量读取，仓库内不再保存任何真实凭据：
+#   CAM_RTSP 优先；否则用 CAM_USER / CAM_PASSWORD / CAM_HOST 拼装。
+CAM_USER = os.environ.get("CAM_USER", "").strip()
+CAM_PASSWORD = os.environ.get("CAM_PASSWORD", "").strip()
+CAM_HOST = os.environ.get("CAM_HOST", "").strip()
+
+
+def _build_rtsp(channel):
+    if not (CAM_USER and CAM_PASSWORD and CAM_HOST):
+        return ""
+    return (
+        f"rtsp://{CAM_USER}:{CAM_PASSWORD}@{CAM_HOST}:554"
+        f"/Streaming/Channels/{channel}"
+    )
+
+
+DEFAULT_MAIN = _build_rtsp("101")
+DEFAULT_SUB = _build_rtsp("102")
 
 WINDOW_TITLE = os.environ.get("CAM_WINDOW_TITLE", "RK3588 Camera - Live")
 
 
 def build_source(channel):
-    return DEFAULT_MAIN if channel in ("main", "101") else DEFAULT_SUB
+    explicit = os.environ.get("CAM_RTSP", "").strip()
+    if explicit:
+        return explicit
+    src = DEFAULT_MAIN if channel in ("main", "101") else DEFAULT_SUB
+    if not src:
+        raise SystemExit(
+            "[ERROR] 未提供摄像头地址，且环境变量中没有可用凭据。请任选其一：\n"
+            "        ① CAM_RTSP=rtsp://<user>:<password>@<ip>:554/Streaming/Channels/101\n"
+            "        ② CAM_USER=<user> CAM_PASSWORD=<password> CAM_HOST=<ip>"
+        )
+    return src
 
 
 def main():

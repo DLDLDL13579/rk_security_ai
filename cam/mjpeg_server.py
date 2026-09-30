@@ -45,13 +45,64 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 import numpy as np
 
-DEFAULT_RTSP_MAIN = "rtsp://admin:GKFD13258@192.168.1.64:554/Streaming/Channels/101"
-DEFAULT_RTSP_SUB = "rtsp://admin:GKFD13258@192.168.1.64:554/Streaming/Channels/102"
+# === 凭据处理（2026-09-30 安全整改）===
+# 原实现把摄像头账号密码明文硬编码在此，并随提交进入了公开仓库（属凭据泄露）。
+# 现改为从环境变量拼装，仓库内不再保存任何真实凭据：
+#   方式一：CAM_RTSP 直接给完整地址（优先级最高，兼容旧用法）
+#   方式二：CAM_USER / CAM_PASSWORD / CAM_HOST 三者齐备时自动拼装
+# 板端由 systemd 单元的 Environment= 注入，不进版本库。
+CAM_USER = os.environ.get("CAM_USER", "").strip()
+CAM_PASSWORD = os.environ.get("CAM_PASSWORD", "").strip()
+CAM_HOST = os.environ.get("CAM_HOST", "").strip()
+
+
+def _mask_rtsp(url):
+    """
+    脱敏 RTSP 地址中的密码，用于日志与 /status 输出。
+
+    原实现直接把含密码的完整地址打印出来（/status 是 HTTP 接口，
+    浏览器与任何能访问 8081 的人都看得到），属凭据泄露。
+    rtsp://user:pw@host:554/... → rtsp://user:***@host:554/...
+    """
+    if not url:
+        return url
+    try:
+        head, tail = url.split("://", 1)
+        if "@" not in tail:
+            return url
+        cred, hostpart = tail.rsplit("@", 1)
+        if ":" not in cred:
+            return url
+        user = cred.split(":", 1)[0]
+        return f"{head}://{user}:***@{hostpart}"
+    except Exception:
+        return "<rtsp>"
+
+
+def _build_rtsp(channel):
+    """按环境变量拼装 RTSP 地址；缺少凭据时返回空串，由下方统一报错"""
+    if not (CAM_USER and CAM_PASSWORD and CAM_HOST):
+        return ""
+    return (
+        f"rtsp://{CAM_USER}:{CAM_PASSWORD}@{CAM_HOST}:554"
+        f"/Streaming/Channels/{channel}"
+    )
+
+
+DEFAULT_RTSP_MAIN = _build_rtsp("101")
+DEFAULT_RTSP_SUB = _build_rtsp("102")
 
 RTSP_URL = os.environ.get("CAM_RTSP", "").strip()
 if not RTSP_URL:
     CHANNEL = os.environ.get("CAM_CHANNEL", "sub").strip().lower()
     RTSP_URL = DEFAULT_RTSP_MAIN if CHANNEL in ("main", "101") else DEFAULT_RTSP_SUB
+if not RTSP_URL:
+    raise SystemExit(
+        "[ERROR] 未提供摄像头地址，且环境变量中没有可用凭据。请任选其一：\n"
+        "        ① CAM_RTSP=rtsp://<user>:<password>@<ip>:554/Streaming/Channels/102\n"
+        "        ② CAM_USER=<user> CAM_PASSWORD=<password> CAM_HOST=<ip>\n"
+        "        （凭据不进版本库；板端见 rk-cam-mjpeg.service 的 Environment=）"
+    )
 
 PORT = int(os.environ.get("CAM_PORT", "8081"))
 PATH = os.environ.get("CAM_PATH", "/cam.mjpg")
@@ -315,7 +366,8 @@ class FrameHub:
                 "mode": "annotated" if self.annotated_active else "rtsp_raw",
                 "annotated_path": self.annotated_path,
                 "last_error": self.last_error,
-                "source": self.source,
+                # 脱敏：/status 是 HTTP 接口，不能回显含密码的完整 RTSP 地址
+                "source": _mask_rtsp(self.source),
             }
 
     def stop(self):
@@ -443,7 +495,7 @@ def main():
     print("=" * 62)
     print(" RK3588 Camera MJPEG relay")
     print("=" * 62)
-    print(f" source   : {RTSP_URL}")
+    print(f" source   : {_mask_rtsp(RTSP_URL)}")
     print(f" listen   : http://0.0.0.0:{PORT}{PATH}")
     print(f" width    : {WIDTH}  fps: {TARGET_FPS}  quality: {QUALITY}")
     print("=" * 62)

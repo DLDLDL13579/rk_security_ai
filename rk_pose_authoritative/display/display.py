@@ -48,6 +48,18 @@ class DisplayThread:
             "RK_DISPLAY_FULLSCREEN", "1"
         ).strip().lower() in ("1", "true", "yes", "on")
         self._window_ready = False
+        # === ANNOTATED_SHARE_PATCH (2026-09-30) ===
+        # 把画好标注的画面额外输出到共享内存，供 MJPEG 服务转发给浏览器
+        self.share_jpeg_path = os.environ.get(
+            "RK_ANNOTATED_JPEG", "/dev/shm/rk_annotated.jpg"
+        ).strip()
+        self.share_quality = int(os.environ.get("RK_ANNOTATED_QUALITY", "70"))
+        self.share_width = int(os.environ.get("RK_ANNOTATED_WIDTH", "0"))
+        self._share_tmp = self.share_jpeg_path + ".tmp" if self.share_jpeg_path else ""
+        self._share_seq = 0
+        self._share_fail_logged = False
+        if self.share_jpeg_path:
+            print(f"[Display] 标注帧共享输出 -> {self.share_jpeg_path}")
 
         self.last_time = time.time()
         self.fps = 0.0
@@ -316,6 +328,40 @@ class DisplayThread:
             thickness,
         )
 
+
+    # === ANNOTATED_SHARE_PATCH (2026-09-30) ===
+    def _share_annotated(self, show):
+        """
+        把画好标注的画面写为 JPEG 到共享内存（原子替换，避免读者读到半张图）。
+
+        为什么用 /dev/shm：tmpfs，纯内存不写磁盘（保护 eMMC/SD 寿命），
+        且跨进程可见。写失败不影响主流程（仅首次打印告警）。
+        """
+        if not self.share_jpeg_path:
+            return
+        try:
+            import cv2 as _cv2
+
+            img = show
+            if self.share_width > 0 and img.shape[1] != self.share_width:
+                h = int(round(img.shape[0] * self.share_width / float(img.shape[1])))
+                img = _cv2.resize(img, (self.share_width, h))
+
+            ok, buf = _cv2.imencode(
+                ".jpg", img, [int(_cv2.IMWRITE_JPEG_QUALITY), self.share_quality]
+            )
+            if not ok:
+                return
+
+            with open(self._share_tmp, "wb") as fh:
+                fh.write(buf.tobytes())
+            os.replace(self._share_tmp, self.share_jpeg_path)  # 原子替换
+            self._share_seq += 1
+        except Exception as exc:
+            if not self._share_fail_logged:
+                print(f"[Display] 标注帧共享写入失败（不影响显示）：{exc}")
+                self._share_fail_logged = True
+
     def run(self):
         print("[Display] Thread Started")
 
@@ -381,6 +427,10 @@ class DisplayThread:
                 2,
             )
 
+            # 先把标注帧共享出去（headless 与显示模式都需要，
+            # 浏览器才能看到与板端屏幕一致的识别结果）
+            self._share_annotated(show)
+
             if self.headless:
                 self._ensure_writer(show.shape)
                 if self.video_writer is not None:
@@ -408,4 +458,11 @@ class DisplayThread:
         if self.video_writer is not None:
             self.video_writer.release()
         cv2.destroyAllWindows()
+        # 清理共享标注帧（避免浏览器读到陈旧画面）
+        if self.share_jpeg_path:
+            try:
+                if os.path.exists(self.share_jpeg_path):
+                    os.remove(self.share_jpeg_path)
+            except Exception:
+                pass
         print("[Display] stopped")

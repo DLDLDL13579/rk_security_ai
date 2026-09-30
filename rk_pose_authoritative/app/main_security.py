@@ -56,6 +56,9 @@ POSE_BACKEND = os.environ.get("RK_POSE_BACKEND", "rknn").strip().lower()
 
 FIRE_SMOKE_MODEL = os.environ.get("RK_FIRE_SMOKE_MODEL", "").strip()
 FALL_CONFIDENCE = float(os.environ.get("RK_FALL_CONFIDENCE", "0.55"))
+# 误报抑制（方案 A）：连续帧确认
+FALL_CONFIRM_FRAMES = int(os.environ.get("RK_FALL_CONFIRM_FRAMES", "3"))
+FIRE_SMOKE_CONFIRM_FRAMES = int(os.environ.get("RK_FIRE_SMOKE_CONFIRM_FRAMES", "3"))
 SECURITY_ENABLED = os.environ.get("RK_SECURITY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
 
 # 缺省示例区域（与 _8.4 默认一致；实际部署按现场画定）
@@ -162,8 +165,17 @@ def main():
     # ---- 安防 + 上报（仅为追加，不影响原链路） ----
     security_thread = None
     zones = build_zones()
-    security_monitor = SecurityMonitor(zones=zones, fall_confidence=FALL_CONFIDENCE)
+    security_monitor = SecurityMonitor(
+        zones=zones,
+        fall_confidence=FALL_CONFIDENCE,
+        fall_confirm_frames=FALL_CONFIRM_FRAMES,
+        fire_smoke_confirm_frames=FIRE_SMOKE_CONFIRM_FRAMES,
+    )
     print(f"[Security] 已配置 {len(zones)} 个区域")
+    print(
+        f"[Security] 误报抑制：跌倒需连续 {FALL_CONFIRM_FRAMES} 帧确认"
+        f"（阈值 {FALL_CONFIDENCE}），烟火需连续 {FIRE_SMOKE_CONFIRM_FRAMES} 帧确认"
+    )
 
     if SECURITY_ENABLED:
         reporter = MqttReporter.from_env()

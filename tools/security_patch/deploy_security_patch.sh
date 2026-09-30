@@ -41,8 +41,16 @@ set -euo pipefail
 PATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-$HOME/rk_security_ai/rk_pose_authoritative}"
 
+# 说明（2026-09-30 修正）：这里原先在目标不存在时会回退到
+#   $HOME/PaddleDetection/rk_pose_authoritative
+# 实测该路径是一个【09-15 的过期副本】，engine/ 下连 security_monitor.py 都没有，
+# 且未被 git 跟踪。回退到它会静默部署进废弃目录、跑起来的仍是旧代码——
+# 这种"看起来成功实则无效"的兜底比直接报错危险得多，故移除，改为明确报错。
 if [ ! -d "$TARGET" ]; then
-    TARGET="$HOME/PaddleDetection/rk_pose_authoritative"
+    echo "[ERROR] 目标工程不存在: $TARGET"
+    echo "        权威工程应为 ~/rk_security_ai/rk_pose_authoritative"
+    echo "        如需指定其它路径: bash $0 /path/to/rk_pose_authoritative"
+    exit 1
 fi
 
 echo "==============================================================="
